@@ -9,10 +9,12 @@
 
 #include <stdio.h>
 
-#include "salz.h"
-
-int main(void)
+int main(int argc, const char *argv[])
 {
-    test_libdivsufsort();
+    (void)argc;
+    (void)argv;
+
+    printf("Hello from salzCLI\n");
+
     return 0;
 }

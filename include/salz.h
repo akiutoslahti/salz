@@ -10,6 +10,11 @@
 #ifndef SALZ_H
 #define SALZ_H
 
-extern void test_libdivsufsort(void);
+#include <stdint.h>
+
+#include "divsufsort.h"
+
+extern int kkp3_factor(uint8_t *T, size_t T_len, saidx_t *SA, size_t SA_len,
+                       int32_t *CPSS, size_t CPSS_len);
 
 #endif /* !SALZ_H */
