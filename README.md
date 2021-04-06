@@ -1,4 +1,4 @@
-# SALZ - Suffix array based general purpose Lempel-Ziv data compressor
+# SALZ - Suffix array based Lempel-Ziv data compressor
 
 ## Build
 
@@ -44,4 +44,38 @@ starting from 16kB and ending to 512kB.
 
 ```
 ./programs/bench_block /path/to/file 14 19 kkp3
+```
+
+### bench\_block\_plt.py
+
+Plot csv formatted output generated with bench\_block tool.
+
+#### Usage
+
+Script takes variable list of csv files to plot into individual figures.
+Plotted figures share the path with input file, with the exception of
+changing extension to `.png`.
+
+```
+Usage: programs/bench_block_plt.py [file1] [file2] ...
+```
+
+#### Examples
+
+Plotting a single csv file.
+
+```
+./programs/bench_block_plt.py path/to/csv/file
+```
+
+Plotting a list of csv files.
+
+```
+./programs/bench_block_plt.py path/to/csv/file1 path/to/csv/file2 ...
+```
+
+Plotting all csv files inside a directory `path/to/dir/`.
+
+```
+./programs/bench_block_plt.py path/to/dir/*.csv
 ```
