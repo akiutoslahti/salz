@@ -17,24 +17,36 @@
 #include "salz.h"
 #include "divsufsort.h"
 
-int main(int argc, const char *argv[])
+static size_t kkp2_aux_len(size_t block_len)
+{
+    return block_len + 1;
+}
+
+static size_t kkp3_aux_len(size_t block_len)
+{
+    return 2 * block_len;
+}
+
+int
+main(int argc, const char *argv[])
 {
     FILE *fp;
     char *p;
     long arg_bs;
     size_t log2_min_bs;
     size_t log2_max_bs;
-    enum bench_target { sa, kkp3 };
-    enum bench_target target;
+    char *target_name;
+    int (*target_func)(uint8_t *, size_t, saidx_t *, size_t, int32_t *, size_t);
+    size_t (*target_aux_len_func)(size_t);
     int rc = 0;
 
     if (argc != 5) {
         fprintf(stderr, "Invalid arguments\n\n"
                 "Usage: %s [file] [log2_min_bs] [log2_max_bs] [target]\n"
-                "    file           Filepath\n"
+                "    file           Path to test file\n"
                 "    log2_min_bs    Log2 of minimum block size\n"
                 "    log2_max_bs    Log2 of maximum block size\n"
-                "    target         Benchmark target: 'sa' or 'kkp3'\n",
+                "    target         Benchmark target: 'kkp2/KKP2' or 'kkp3/KKP3'\n",
                 argv[0]);
         return 1;
     }
@@ -60,10 +72,14 @@ int main(int argc, const char *argv[])
         return 1;
     }
 
-    if (strcmp(argv[4], "sa") == 0) {
-        target = sa;
-    } else if (strcmp(argv[4], "kkp3") == 0) {
-        target = kkp3;
+    if (strcmp(argv[4], "kkp2") == 0 || strcmp(argv[4], "KKP2") == 0) {
+        target_name = "KKP2";
+        target_func = &kkp2_factor;
+        target_aux_len_func = &kkp2_aux_len;
+    } else if (strcmp(argv[4], "kkp3") == 0 || strcmp(argv[4], "KKP3") == 0) {
+        target_name = "KKP3";
+        target_func = &kkp3_factor;
+        target_aux_len_func = &kkp3_aux_len;
     } else {
         fprintf(stderr, "Unknown target: %s\n", argv[4]);
         return 1;
@@ -74,87 +90,67 @@ int main(int argc, const char *argv[])
         return 1;
     }
 
-    printf("block size (log2),block size (b),suffix sorting time (s),");
-    if (target == sa)
-        printf("I/O time (s),total time (s)\n");
-    else
-        printf("factorization time (s),I/O time (s),total time (s),factors (#)\n");
+    printf("block size (log2),block size (b),divsufsort time (s),"
+           "%s time (s),I/O time (s),total time (s),phrases (#)\n",
+           target_name);
 
     for (size_t log2_bs = log2_min_bs; log2_bs <= log2_max_bs; log2_bs++) {
-        uint8_t *T;
-        size_t T_len;
-        saidx_t *SA;
-        size_t SA_len;
-        int32_t *CPSS = NULL;
-        size_t CPSS_len;
+        uint8_t *block;
+        size_t block_len;
+        saidx_t *sa;
+        size_t sa_len;
+        int32_t *aux;
+        size_t aux_len;
         size_t bytes_read;
-        uint64_t t_total;
-        uint64_t t_sa = 0;
-        uint64_t t_target = 0;
-        uint64_t t_start;
+        uint64_t total_ns;
+        uint64_t start_ns;
+        uint64_t sa_ns = 0;
+        uint64_t target_ns = 0;
+        size_t nr_target_factors = 0;
         int res;
-        size_t nfactors = 0;
 
-        T_len = 1L << log2_bs;
-        SA_len = T_len;
+        block_len = 1L << log2_bs;
+        sa_len = block_len + 2;
+        aux_len = (*target_aux_len_func)(block_len);
 
-        if (target == kkp3) {
-            SA_len = T_len + 2;
-            CPSS_len = 2 * T_len;
-        }
+        block = malloc(block_len * sizeof(*block));
+        sa = malloc(sa_len * sizeof(*sa));
+        aux = malloc(aux_len * sizeof(*aux));
 
-        T = malloc(T_len * sizeof(*T));
-        SA = malloc(SA_len * sizeof(*SA));
-
-        if (T == NULL || SA == NULL) {
+        if (block == NULL || sa == NULL || aux == NULL) {
             fprintf(stderr, "Memory allocation failed\n");
             rc = 1;
             break;
         }
 
-        if (target == kkp3) {
-            if ((CPSS = malloc(CPSS_len * sizeof(*CPSS))) == NULL) {
-                fprintf(stderr, "Memory allocation failed\n");
+        total_ns = get_time_ns();
+        while ((bytes_read = fread(block, sizeof(*block), block_len, fp)) != 0) {
+            start_ns = get_time_ns();
+            res = divsufsort((sauchar_t *)block, sa + 1, bytes_read);
+            sa_ns += get_time_ns() - start_ns;
+
+            if (res != 0) {
+                fprintf(stderr, "divsufsort failed\n");
                 rc = 1;
                 break;
             }
-        }
 
-        t_total = get_time_ns();
-        if (target == sa) {
-            while ((bytes_read = fread(T, sizeof(*T), T_len, fp)) != 0) {
-                t_start = get_time_ns();
-                if (divsufsort((sauchar_t *)T, SA, bytes_read) != 0) {
-                    fprintf(stderr, "divsufsort failed\n");
-                    rc = 1;
-                    break;
-                }
-                t_sa += get_time_ns() - t_start;
-            }
-        } else {
-            while ((bytes_read = fread(T, sizeof(*T), T_len, fp)) != 0) {
-                t_start = get_time_ns();
-                if (divsufsort((sauchar_t *)T, SA + 1, bytes_read) != 0) {
-                    fprintf(stderr, "divsufsort failed\n");
-                    rc = 1;
-                    break;
-                }
-                t_sa += get_time_ns() - t_start;
+            start_ns = get_time_ns();
+            res = (*target_func)(block, bytes_read, sa, sa_len, aux, aux_len);
+            target_ns += get_time_ns() - start_ns;
 
-                t_start = get_time_ns();
-                if ((res = kkp3_factor(T, bytes_read, SA, SA_len, CPSS, CPSS_len)) < 0) {
-                    fprintf(stderr, "kkp3 factorization failed\n");
-                    rc = 1;
-                    break;
-                }
-                t_target += get_time_ns() - t_start;
-                nfactors += res;
+            if (res < 0) {
+                fprintf(stderr, "%s factorization failed\n", target_name);
+                rc = 1;
+                break;
             }
+
+            nr_target_factors += res;
         }
-        t_total = get_time_ns() - t_total;
+        total_ns = get_time_ns() - total_ns;
 
         if (ferror(fp) || !feof(fp)) {
-            fprintf(stderr, "Did not reach EOF\n");
+            fprintf(stderr, "Error or EOF not reached\n");
             rc = 1;
         }
 
@@ -164,26 +160,24 @@ int main(int argc, const char *argv[])
             rc = 1;
         }
 
-        printf("%zu,%ld,%.5Lf,", log2_bs, T_len, 1.0L * t_sa / 1000000000);
-        if (target == sa)
-            printf("%.5Lf,%.5Lf\n",
-                   1.0L * (t_total - t_sa) / 1000000000,
-                   1.0L * t_total / 1000000000);
-        else
-            printf("%.5Lf,%.5Lf,%.5Lf,%zu\n",
-                   1.0L * t_target / 1000000000,
-                   1.0L * (t_total - t_sa - t_target) / 1000000000,
-                   1.0L * t_total / 1000000000,
-                   nfactors);
+        printf("%zu,%ld,%.5Lf,%.5Lf,%.5Lf,%.5Lf,%zu\n",
+               log2_bs,
+               block_len,
+               1.0L * sa_ns / 1000000000,
+               1.0L * target_ns / 1000000000,
+               1.0L * (total_ns - sa_ns - target_ns) / 1000000000,
+               1.0L * total_ns / 1000000000,
+               nr_target_factors);
 
-        free(T);
-        free(SA);
-        free(CPSS);
+        free(block);
+        free(sa);
+        free(aux);
 
         if (rc != 0)
             break;
     }
 
     fclose(fp);
+
     return rc;
 }
