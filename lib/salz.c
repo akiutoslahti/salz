@@ -57,6 +57,56 @@ lz_factor(uint8_t *T, size_t T_len, size_t pos, int32_t psv, int32_t nsv,
 }
 
 int
+kkp2_factor(uint8_t *T, size_t T_len, saidx_t *SA, size_t SA_len,
+            int32_t *phi, size_t phi_len)
+{
+    size_t top;
+    size_t nfactors;
+    size_t next;
+
+    if (SA_len < T_len + 2 || phi_len < T_len + 1)
+        return -1;
+
+    SA[0] = 0;
+    SA[T_len + 1] = -1;
+
+    top = 0;
+    for (size_t i = 1; i < T_len + 2; i++) {
+        SA[i] += 1;
+        while (SA[top] > SA[i]) {
+            phi[SA[top]] = SA[i];
+            top -= 1;
+        }
+        top += 1;
+        SA[top] = SA[i];
+    }
+
+    phi[0] = 0;
+    next = 1;
+    nfactors = 0;
+    for (size_t t = 1; t < T_len + 1; t++) {
+        size_t nsv;
+        size_t psv;
+
+        nsv = phi[t];
+        psv = phi[nsv];
+        if (t == next) {
+            size_t pos;
+            size_t len;
+
+            lz_factor(T, T_len, t - 1, psv - 1, nsv - 1, &pos, &len);
+            next += len > 0 ? len : 1;
+            nfactors += 1;
+            //printf("%zu %zu\n", pos, len);
+        }
+        phi[t] = psv;
+        phi[nsv] = t;
+    }
+
+    return nfactors;
+}
+
+int
 kkp3_factor(uint8_t *T, size_t T_len, saidx_t *SA, size_t SA_len,
             int32_t *CPSS, size_t CPSS_len)
 {
