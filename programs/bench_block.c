@@ -99,8 +99,8 @@ int main(int argc, const char *argv[])
         SA_len = T_len;
 
         if (target == kkp3) {
-            SA_len += 2;
-            CPSS_len = 2 * SA_len + 1;
+            SA_len = T_len + 2;
+            CPSS_len = 2 * T_len;
         }
 
         T = malloc(T_len * sizeof(*T));

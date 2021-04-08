@@ -65,7 +65,7 @@ kkp3_factor(uint8_t *T, size_t T_len, saidx_t *SA, size_t SA_len,
     size_t nfactors;
     size_t i;
 
-    if (SA_len < T_len + 2 || CPSS_len < 2 * SA_len + 1)
+    if (SA_len < T_len + 2 || CPSS_len < 2 * T_len)
         return -1;
 
     SA[0] = -1;
