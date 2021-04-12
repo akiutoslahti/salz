@@ -97,7 +97,7 @@ kkp2_factor(uint8_t *T, size_t T_len, saidx_t *SA, size_t SA_len,
             lz_factor(T, T_len, t - 1, psv - 1, nsv - 1, &pos, &len);
             next += len > 0 ? len : 1;
             nfactors += 1;
-            //printf("%zu %zu\n", pos, len);
+            //printf("%zu %zu\n", len > 0 ? (t - 1) - pos : pos, len);
         }
         phi[t] = psv;
         phi[nsv] = t;
@@ -146,9 +146,9 @@ kkp3_factor(uint8_t *T, size_t T_len, saidx_t *SA, size_t SA_len,
         psv = CPSS[addr];
         nsv = CPSS[addr + 1];
         lz_factor(T, T_len, i, psv, nsv, &pos, &len);
+        //printf("%zu %zu\n", len > 0 ? i - pos : pos, len);
         i += len > 0 ? len : 1;
         nfactors += 1;
-        //printf("%zu %zu\n", pos, len);
     }
 
     return nfactors;
