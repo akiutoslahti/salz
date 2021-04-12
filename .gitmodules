@@ -1,3 +1,6 @@
 [submodule "3rdparty/libdivsufsort"]
 	path = 3rdparty/libdivsufsort
 	url = https://github.com/y-256/libdivsufsort.git
+[submodule "3rdparty/libsais"]
+	path = 3rdparty/libsais
+	url = https://github.com/IlyaGrebnov/libsais.git
