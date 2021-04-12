@@ -30,7 +30,8 @@ lz_factor(uint8_t *T, size_t T_len, size_t pos, int32_t psv, int32_t nsv,
 {
     size_t len = 0;
 
-    if (nsv == -1) {
+    if (nsv == -1 && psv == -1) {
+    } else if (nsv == -1) {
         len += lcp_compare(T, T_len, psv, pos);
         *out_pos = psv;
     } else if (psv == -1) {
