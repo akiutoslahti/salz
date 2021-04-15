@@ -20,6 +20,43 @@
 
 #define NS_IN_SEC 1000000000
 
+static double
+compute_lcp_mean(uint8_t *text, int32_t *sa, size_t n, int32_t *aux, size_t aux_len)
+{
+    int32_t *phi;
+    int32_t *plcp;
+    uint64_t lcp_sum;
+    size_t i, l;
+
+    if (aux_len < 2 * n) {
+        fprintf(stderr, "auxiliary array is too short\n");
+        return 0.0;
+    }
+
+    phi = aux;
+    for (i = 1; i < n; i++)
+        phi[sa[i]] = sa[i - 1];
+
+    plcp = &aux[n];
+    l = 0;
+    for (i = 0; i < n; i++) {
+        while (i + l < n &&
+               phi[i] + l < n &&
+               text[i + l] == text[phi[i] + l]) {
+            l += 1;
+        }
+        plcp[i] = l;
+        if (l > 0)
+            l -= 1;
+    }
+
+    lcp_sum = 0;
+    for (i = 1; i < n; i++)
+        lcp_sum += plcp[sa[i]];
+
+    return 1.0 * lcp_sum / (n - 1);
+}
+
 int
 main(int argc, const char *argv[])
 {
@@ -75,7 +112,7 @@ main(int argc, const char *argv[])
 
     printf("filename,block size (log2),block size (b),io time (s),"
            "divsufsort time (s),sais time (s),kkp2 time (s),kkp3 time (s),"
-           "phrases (nr)\n");
+           "lcp mean,phrases (nr)\n");
 
     for (size_t log2_bs = log2_min_bs; log2_bs <= log2_max_bs; log2_bs++) {
         uint8_t *block;
@@ -93,6 +130,9 @@ main(int argc, const char *argv[])
         uint64_t kkp3_ns = 0;
         size_t nr_kkp2_factors = 0;
         size_t nr_kkp3_factors = 0;
+        double lcp_mean = 0.0;
+        double lcp_mean_block;
+        size_t prev_blocks = 0;
         int res;
 
         block_len = 1L << log2_bs;
@@ -133,6 +173,16 @@ main(int argc, const char *argv[])
                 rc = 1;
                 break;
             }
+
+            /* mean lcp */
+            lcp_mean_block = compute_lcp_mean(block, sa + 1, bytes_read, aux, aux_len);
+            /* weigh mean if last block is short */
+            if (bytes_read != block_len)
+                lcp_mean = (lcp_mean * prev_blocks * block_len + lcp_mean_block * bytes_read) /
+                           (prev_blocks * block_len + bytes_read);
+            else
+                lcp_mean = (lcp_mean * prev_blocks + lcp_mean_block) / (prev_blocks + 1);
+            prev_blocks += 1;
 
             /* kkp2 factorization */
             start_ns = get_time_ns();
@@ -191,15 +241,16 @@ main(int argc, const char *argv[])
             rc = 1;
         }
 
-        printf("%s,%zu,%ld,%.5Lf,%.5Lf,%.5Lf,%.5Lf,%.5Lf,%zu\n",
+        printf("%s,%zu,%ld,%.5f,%.5f,%.5f,%.5f,%.5f,%.1f,%zu\n",
                fname,
                log2_bs,
                block_len,
-               1.0L * io_ns / NS_IN_SEC,
-               1.0L * divsufsort_ns / NS_IN_SEC,
-               1.0L * sais_ns / NS_IN_SEC,
-               1.0L * kkp2_ns / NS_IN_SEC,
-               1.0L * kkp3_ns / NS_IN_SEC,
+               1.0 * io_ns / NS_IN_SEC,
+               1.0 * divsufsort_ns / NS_IN_SEC,
+               1.0 * sais_ns / NS_IN_SEC,
+               1.0 * kkp2_ns / NS_IN_SEC,
+               1.0 * kkp3_ns / NS_IN_SEC,
+               lcp_mean,
                nr_kkp2_factors);
 
         free(block);
