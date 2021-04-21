@@ -8,20 +8,171 @@
  * See file LICENSE or a copy at <https://opensource.org/licenses/MIT>.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <errno.h>
 #include <string.h>
+#include <time.h>
 
-#include "common.h"
-#include "salz.h"
 #include "divsufsort.h"
 #include "libsais.h"
 
 #define NS_IN_SEC 1000000000
 
-static double
-compute_lcp_mean(uint8_t *text, int32_t *sa, size_t n, int32_t *aux, size_t aux_len)
+static uint64_t get_time_ns(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    {
+        perror("clock_gettime");
+        return 0;
+    }
+
+    return ts.tv_sec * NS_IN_SEC + ts.tv_nsec;
+}
+
+static size_t lcp_compare(uint8_t *text, size_t text_len, size_t pos1,
+        size_t pos2)
+{
+    size_t len = 0;
+
+    while (pos2 + len < text_len && text[pos1 + len] == text[pos2 + len])
+        len += 1;
+
+    return len;
+}
+
+static void lz_factor(uint8_t *text, size_t text_len, size_t pos, int32_t psv,
+        int32_t nsv, size_t *out_pos, size_t *out_len)
+{
+    size_t len = 0;
+
+    if (nsv == -1 && psv == -1) {
+    } else if (nsv == -1) {
+        len += lcp_compare(text, text_len, psv, pos);
+        *out_pos = psv;
+    } else if (psv == -1) {
+        len += lcp_compare(text, text_len, nsv, pos);
+        *out_pos = nsv;
+    } else {
+        if (psv < nsv)
+            len += lcp_compare(text, text_len, psv, nsv);
+        else
+            len += lcp_compare(text, text_len, nsv, psv);
+        if (text[psv + len] == text[pos + len]) {
+            len += lcp_compare(text, text_len, psv + len, pos + len);
+            *out_pos = psv;
+        } else {
+            len += lcp_compare(text, text_len, nsv + len, pos + len);
+            *out_pos = nsv;
+        }
+    }
+
+    if (len == 0)
+        *out_pos = text[pos];
+
+    *out_len = len;
+}
+
+static int kkp2_factor(uint8_t *text, size_t text_len, int32_t *sa,
+        size_t sa_len, int32_t *phi, size_t phi_len)
+{
+    size_t top;
+    size_t nfactors;
+    size_t next;
+
+    if (sa_len < text_len + 2 || phi_len < text_len + 1)
+        return -1;
+
+    sa[0] = 0;
+    sa[text_len + 1] = -1;
+
+    top = 0;
+    for (size_t i = 1; i < text_len + 2; i++) {
+        sa[i] += 1;
+        while (sa[top] > sa[i]) {
+            phi[sa[top]] = sa[i];
+            top -= 1;
+        }
+        top += 1;
+        sa[top] = sa[i];
+    }
+
+    phi[0] = 0;
+    next = 1;
+    nfactors = 0;
+    for (size_t t = 1; t < text_len + 1; t++) {
+        size_t nsv;
+        size_t psv;
+
+        nsv = phi[t];
+        psv = phi[nsv];
+        if (t == next) {
+            size_t pos;
+            size_t len;
+
+            lz_factor(text, text_len, t - 1, psv - 1, nsv - 1, &pos, &len);
+            next += len > 0 ? len : 1;
+            nfactors += 1;
+            //printf("%zu %zu\n", len > 0 ? (t - 1) - pos : pos, len);
+        }
+        phi[t] = psv;
+        phi[nsv] = t;
+    }
+
+    return nfactors;
+}
+
+static int kkp3_factor(uint8_t *text, size_t text_len, int32_t *sa,
+        size_t sa_len, int32_t *cpss, size_t cpss_len)
+{
+    size_t top;
+    size_t addr;
+    size_t nfactors;
+    size_t i;
+
+    if (sa_len < text_len + 2 || cpss_len < 2 * text_len)
+        return -1;
+
+    sa[0] = -1;
+    sa[text_len + 1] = -1;
+
+    top = 0;
+    for (i = 1; i < text_len + 2; i++) {
+        while (sa[top] > sa[i]) {
+            addr = sa[top] << 1;
+            cpss[addr] = sa[top - 1];
+            cpss[addr + 1] = sa[i];
+            top -= 1;
+        }
+        top += 1;
+        sa[top] = sa[i];
+    }
+
+    //printf("%d %d\n", text[0], 0);
+    i = 1;
+    nfactors = 1;
+    while (i < text_len) {
+        int32_t psv;
+        int32_t nsv;
+        size_t len;
+        size_t pos;
+
+        addr = i << 1;
+        psv = cpss[addr];
+        nsv = cpss[addr + 1];
+        lz_factor(text, text_len, i, psv, nsv, &pos, &len);
+        //printf("%zu %zu\n", len > 0 ? i - pos : pos, len);
+        i += len > 0 ? len : 1;
+        nfactors += 1;
+    }
+
+    return nfactors;
+}
+
+static double compute_lcp_mean(uint8_t *text, int32_t *sa, size_t n,
+        int32_t *aux, size_t aux_len)
 {
     int32_t *phi;
     int32_t *plcp;
@@ -57,8 +208,7 @@ compute_lcp_mean(uint8_t *text, int32_t *sa, size_t n, int32_t *aux, size_t aux_
     return 1.0 * lcp_sum / (n - 1);
 }
 
-int
-main(int argc, const char *argv[])
+int main(int argc, const char *argv[])
 {
     const char *fname;
     FILE *fp;
@@ -117,7 +267,7 @@ main(int argc, const char *argv[])
     for (size_t log2_bs = log2_min_bs; log2_bs <= log2_max_bs; log2_bs++) {
         uint8_t *block;
         size_t block_len;
-        saidx_t *sa;
+        int32_t *sa;
         size_t sa_len;
         int32_t *aux;
         size_t aux_len;
@@ -175,13 +325,16 @@ main(int argc, const char *argv[])
             }
 
             /* mean lcp */
-            lcp_mean_block = compute_lcp_mean(block, sa + 1, bytes_read, aux, aux_len);
+            lcp_mean_block = compute_lcp_mean(block, sa + 1, bytes_read, aux,
+                                              aux_len);
             /* weigh mean if last block is short */
             if (bytes_read != block_len)
-                lcp_mean = (lcp_mean * prev_blocks * block_len + lcp_mean_block * bytes_read) /
+                lcp_mean = (lcp_mean * prev_blocks * block_len +
+                            lcp_mean_block * bytes_read) /
                            (prev_blocks * block_len + bytes_read);
             else
-                lcp_mean = (lcp_mean * prev_blocks + lcp_mean_block) / (prev_blocks + 1);
+                lcp_mean = (lcp_mean * prev_blocks + lcp_mean_block) /
+                           (prev_blocks + 1);
             prev_blocks += 1;
 
             /* kkp2 factorization */
