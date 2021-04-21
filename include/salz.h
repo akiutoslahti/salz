@@ -13,7 +13,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-extern size_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
-        size_t dst_len);
+extern size_t salz_encode_default(uint8_t *src, size_t src_len,
+                                  uint8_t *dst, size_t dst_len);
 
 #endif /* !SALZ_H */

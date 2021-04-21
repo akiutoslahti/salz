@@ -12,25 +12,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
+#include "common.h"
 #include "divsufsort.h"
 #include "libsais.h"
-
-#define NS_IN_SEC 1000000000
-
-static uint64_t get_time_ns(void)
-{
-    struct timespec ts;
-
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-    {
-        perror("clock_gettime");
-        return 0;
-    }
-
-    return ts.tv_sec * NS_IN_SEC + ts.tv_nsec;
-}
 
 static size_t lcp_compare(uint8_t *text, size_t text_len, size_t pos1,
         size_t pos2)
