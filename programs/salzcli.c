@@ -19,22 +19,107 @@
 #include "salz.h"
 
 #define DEFAULT_LOG2_BLOCK_SIZE 16
-#define DEFAULT_BLOCK_SIZE (1 << DEFAULT_LOG2_BLOCK_SIZE)
 
-static int compress_filename(char *in_fname, char *out_fname, size_t block_size)
+static int decompress_fname(char *in_fname, char *out_fname)
 {
     FILE *in_stream = NULL;
     FILE *out_stream = NULL;
     uint8_t *src_buf = NULL;
     uint8_t *dst_buf = NULL;
-    size_t src_len = block_size;
+    size_t src_len;
+    size_t dst_len;
+    uint32_t block_size;
+    uint32_t read_size;
+    size_t out_fsize = 0;
+    uint64_t clock;
+    int ret = 0;
+
+    if ((in_stream = fopen(in_fname, "r")) == NULL) {
+        perror("Input file could not be opened");
+        goto fail;
+    }
+
+    if ((out_stream = fopen(out_fname, "w")) == NULL) {
+        perror("Output file could not be opened");
+        goto fail;
+    }
+
+    if (fread(&block_size, sizeof(block_size), 1, in_stream) != sizeof(block_size)) {
+        /* @TODO Add error ? */
+    }
+
     /* @TODO formulate maximum compressed size better */
-    size_t dst_len = 2 * block_size;
+    src_len = 2 * block_size;
+    dst_len = block_size;
+
+    src_buf = malloc(src_len);
+    dst_buf = malloc(dst_len);
+
+    if (src_buf == NULL || dst_buf == NULL)
+        goto fail;
+
+    clock = get_time_ns();
+    while (fread(&read_size, sizeof(read_size), 1, in_stream) != 0) {
+        if (read_size < src_len &&
+            fread(src_buf, 1, read_size, in_stream) != read_size) {
+            /* @TODO Add error ? */
+            goto fail;
+        }
+
+        uint32_t decoded_len = salz_decode_default(src_buf, read_size, dst_buf, dst_len);
+
+        if (decoded_len == 0) {
+            /* @TODO Add error ? */
+            goto fail;
+        }
+
+        if (fwrite(dst_buf, 1, decoded_len, out_stream) != decoded_len) {
+            /* @TODO Add error ? */
+            goto fail;
+        }
+
+        out_fsize += decoded_len;
+    }
+    clock = get_time_ns() - clock;
+
+    fprintf(stdout, "Decompressed %zu bytes in %.2f seconds\n",
+            out_fsize, 1.0 * clock / NS_IN_SEC);
+
+exit:
+    if (in_stream != NULL)
+        fclose(in_stream);
+    if (out_stream != NULL)
+        fclose(out_stream);
+    free(src_buf);
+    free(dst_buf);
+
+    return ret;
+
+fail:
+    ret = -1;
+    goto exit;
+}
+
+static int compress_fname(char *in_fname, char *out_fname,
+        uint32_t log2_block_size)
+{
+    FILE *in_stream = NULL;
+    FILE *out_stream = NULL;
+    uint8_t *src_buf = NULL;
+    uint8_t *dst_buf = NULL;
+    uint32_t block_size;
+    size_t src_len;
+    size_t dst_len;
     size_t read_len;
     size_t in_fsize = 0;
     size_t out_fsize = 0;
     int ret = 0;
     uint64_t clock;
+
+    block_size = 1 << log2_block_size;
+    src_len = block_size;
+    /* @TODO formulate maximum compressed size better */
+    dst_len = 2 * block_size;
 
     if ((in_stream = fopen(in_fname, "r")) == NULL) {
         perror("Input file could not be opened");
@@ -53,27 +138,31 @@ static int compress_filename(char *in_fname, char *out_fname, size_t block_size)
         goto fail;
 
     clock = get_time_ns();
+    if (fwrite(&block_size, sizeof(block_size), 1, out_stream) == 0) {
+        /* @TODO add error ? */
+    }
+    out_fsize += sizeof(block_size);
     while ((read_len = fread(src_buf, 1, src_len, in_stream)) != 0) {
         in_fsize += read_len;
-        size_t encoded_len = salz_encode_default(src_buf, read_len, dst_buf,
-                                                 dst_len);
+        uint32_t encoded_len = salz_encode_default(src_buf, read_len, dst_buf,
+                                                   dst_len);
 
         if (encoded_len == 0) {
             /* @TODO add error ? */
+            goto fail;
         }
 
-        if (fwrite(dst_buf, 1, encoded_len, out_stream) != encoded_len) {
+        if (fwrite(&encoded_len, sizeof(encoded_len), 1, out_stream) == 0 ||
+            fwrite(dst_buf, 1, encoded_len, out_stream) != encoded_len) {
             /* @TODO add error ? */
+            goto fail;
         }
-
         out_fsize += encoded_len;
     }
     clock = get_time_ns() - clock;
 
-    fprintf(stdout, "Original size: %zuB, compressed size: %zuB, "
-            "compression ratio: %.2lf, compression time: %.2lfs\n", in_fsize,
-            out_fsize, 1.0 * in_fsize / out_fsize, 1.0 * clock / NS_IN_SEC);
-
+    fprintf(stdout, "Compressed %zu bytes into %zu bytes (ratio: %.2f) in %.2f seconds\n",
+            in_fsize, out_fsize, 1.0 * in_fsize / out_fsize, 1.0 * clock / NS_IN_SEC);
 
 exit:
     if (in_stream != NULL)
@@ -135,7 +224,8 @@ static bool parse_u32(char *optarg, uint32_t *res)
 int main(int argc, char *argv[])
 {
     char *binary_name = get_name(argv[0]);
-    size_t block_size = DEFAULT_BLOCK_SIZE;
+    uint32_t log2_block_size = DEFAULT_LOG2_BLOCK_SIZE;
+    bool decompress_mode = false;
 
     while (1) {
         char *short_opt = "b:dh";
@@ -157,13 +247,13 @@ int main(int argc, char *argv[])
                     fprintf(stderr, "Invalid block size\n");
                     return 1;
                 }
-                block_size = 1 << u32val;
+                log2_block_size = u32val;
                 break;
             }
 
             case 'd':
-                printf("decompress mode not yet implemented\n");
-                return 1;
+                decompress_mode = true;
+                break;
 
             case 'h':
                 print_usage(binary_name);
@@ -202,5 +292,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    return compress_filename(in_fname, out_fname, block_size);
+    if (decompress_mode)
+        return decompress_fname(in_fname, out_fname);
+    return compress_fname(in_fname, out_fname, log2_block_size);
 }

@@ -46,6 +46,23 @@ static size_t write_vbyte(uint8_t *dst, size_t pos, uint32_t value)
     return pos - orig_pos + 1;
 }
 
+static size_t read_vbyte(uint8_t *src, size_t pos, uint32_t *res)
+{
+    uint32_t value = 0;
+    size_t vbyte_len = 0;
+
+    while (src[pos] < 0x80) {
+        value += src[pos] << (7 * vbyte_len);
+        pos += 1;
+        vbyte_len += 1;
+    }
+
+    value += (src[pos] & 0x7f) << (7 * vbyte_len);
+    *res = value;
+
+    return vbyte_len + 1;
+}
+
 static size_t lcp_compare(uint8_t *text, size_t text_len, size_t pos1,
         size_t pos2)
 {
@@ -91,17 +108,17 @@ static void lz_factor(uint8_t *text, size_t text_len, size_t pos, int32_t psv,
     *out_len = len;
 }
 
-size_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
+uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         size_t dst_len)
 {
-    /* @TODO destination buffer boundary checks */
+    /* @TODO add buffer boundary checks for memsafety */
     (void)dst_len;
 
     int32_t *sa;
     int32_t *psv_nsv;
     size_t sa_len = kkp_sa_len(src_len);
     size_t psv_nsv_len = kkp3_psv_nsv_len(src_len);
-    size_t ret = 0;
+    uint32_t ret = 0;
 
     sa = malloc(sa_len * sizeof(*sa));
     psv_nsv = malloc(psv_nsv_len * sizeof(*psv_nsv));
@@ -162,11 +179,50 @@ size_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         dst_pos += literals;
     }
 
-    ret = dst_pos;
+    ret = (uint32_t)dst_pos;
 
 clean:
     free(sa);
     free(psv_nsv);
 
     return ret;
+}
+
+
+uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
+        size_t dst_len)
+{
+    /* @TODO add buffer boundary checks for memsafety */
+    (void)dst_len;
+
+    size_t src_pos = 0;
+    size_t dst_pos = 0;
+
+    while (src_pos < src_len) {
+        uint32_t literals;
+
+        src_pos += read_vbyte(src, src_pos, &literals);
+        memcpy(&dst[dst_pos], &src[src_pos], literals);
+        dst_pos += literals;
+        src_pos += literals;
+
+        if (src_pos == src_len)
+            break;
+
+        uint32_t factor_offset;
+        uint32_t factor_len;
+
+        src_pos += read_vbyte(src, src_pos, &factor_offset);
+        src_pos += read_vbyte(src, src_pos, &factor_len);
+
+        size_t copy_pos = dst_pos - factor_offset;
+        while (factor_len > 0) {
+            dst[dst_pos] = dst[copy_pos];
+            dst_pos += 1;
+            copy_pos += 1;
+            factor_len -= 1;
+        }
+    }
+
+    return (uint32_t)dst_pos;
 }
