@@ -7,31 +7,48 @@
  * See file LICENSE or a copy at <https://opensource.org/licenses/MIT>.
  */
 
-#include <stdio.h>
 #include <string.h>
 
 #include "salz.h"
 #include "divsufsort.h"
 
+#ifdef NDEBUG
+#   ifndef assert
+#       define assert(condition) ((void)0)
+#   endif
+#   define debug(...) do {} while(0);
+#else
+#   include <assert.h>
+#   include <stdio.h>
+#   define debug(...)                         \
+        do {                                \
+            fprintf(stderr, "(%s:%d) - ",   \
+                    __func__, __LINE__);    \
+            fprintf(stderr, __VA_ARGS__);   \
+            fprintf(stderr, "\n");          \
+        } while (0);
+#endif
+
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) < (b)) ? (b) : (a))
 
-static inline size_t kkp_sa_len(size_t text_len)
+static size_t kkp_sa_len(size_t text_len)
 {
     return text_len + 2;
 }
 
-static inline size_t kkp2_phi_len(size_t text_len)
+__attribute__((unused)) static size_t kkp2_phi_len(size_t text_len)
 {
     return text_len + 1;
 }
 
-static inline size_t kkp3_psv_nsv_len(size_t text_len)
+static size_t kkp3_psv_nsv_len(size_t text_len)
 {
     return 2 * text_len;
 }
 
-static size_t write_vbyte(uint8_t *dst, size_t pos, uint32_t value)
+__attribute__((unused)) static size_t write_vbyte(uint8_t *dst, size_t pos,
+        uint32_t value)
 {
     size_t orig_pos = pos;
 
@@ -46,7 +63,7 @@ static size_t write_vbyte(uint8_t *dst, size_t pos, uint32_t value)
     return pos - orig_pos + 1;
 }
 
-static size_t read_vbyte(uint8_t *src, size_t pos, uint32_t *res)
+__attribute__((unused)) static size_t read_vbyte(uint8_t *src, size_t pos, uint32_t *res)
 {
     uint32_t value = 0;
     size_t vbyte_len = 0;
@@ -124,12 +141,12 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     psv_nsv = malloc(psv_nsv_len * sizeof(*psv_nsv));
 
     if (sa == NULL || psv_nsv == NULL) {
-        /* @TODO add error ? */
+        debug("Memory allocation failed for SA or NSV/PSV");
         goto clean;
     }
 
     if (divsufsort(src, sa + 1, src_len) != 0) {
-        /* @TODO add error ? */
+        debug("divsufsort failed");
         goto clean;
     }
 
@@ -156,26 +173,84 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         uint32_t factor_pos;
         uint32_t factor_len;
 
+        /* Limit factor offset */
+        psv = src_pos - psv < 65536 ? psv : -1;
+        nsv = src_pos - nsv < 65536 ? nsv : -1;
         lz_factor(src, src_len, src_pos, psv, nsv, &factor_pos, &factor_len);
 
         if (factor_len < 4) {
             literals += max(1, factor_len);
             src_pos += max(1, factor_len);
         } else {
-            dst_pos += write_vbyte(dst, dst_pos, literals);
-            memcpy(&dst[dst_pos], &src[src_pos - literals], literals);
-            dst_pos += literals;
-            literals = 0;
+            uint8_t token = (min(literals, 15) << 4) | min(factor_len - 4, 15);
+            assert(dst_pos < dst_len);
+            dst[dst_pos] = token;
+            dst_pos += 1;
 
-            dst_pos += write_vbyte(dst, dst_pos, src_pos - factor_pos);
-            dst_pos += write_vbyte(dst, dst_pos, factor_len);
+            if (literals >= 15) {
+                uint32_t tmp = literals - 15;
+                while (tmp >= 255) {
+                    assert(dst_pos < dst_len);
+                    dst[dst_pos] = 255;
+                    dst_pos += 1;
+                    tmp -= 255;
+                }
+                assert(dst_pos < dst_len);
+                dst[dst_pos] = tmp;
+                dst_pos += 1;
+            }
+
+            size_t copy_pos = src_pos - literals;
+            assert(dst_pos + literals - 1 < dst_len);
+            memcpy(&dst[dst_pos], &src[copy_pos], literals);
+            dst_pos += literals;
+
+            uint16_t factor_offs = src_pos - factor_pos;
+            assert(factor_offs <= src_pos);
+            assert(dst_pos + sizeof(factor_offs) - 1 < dst_len);
+            memcpy(&dst[dst_pos], &factor_offs, sizeof(factor_offs));
+            dst_pos += sizeof(factor_offs);
+
+            if (factor_len - 4 >= 15) {
+                uint32_t tmp = factor_len - 15 - 4;
+                while (tmp >= 255) {
+                    assert(dst_pos < dst_len);
+                    dst[dst_pos] = 255;
+                    dst_pos += 1;
+                    tmp -= 255;
+                }
+                assert(dst_pos < dst_len);
+                dst[dst_pos] = tmp;
+                dst_pos += 1;
+            }
+
+            literals = 0;
             src_pos += factor_len;
         }
     }
 
     if (literals != 0) {
-        dst_pos += write_vbyte(dst, dst_pos, literals);
-        memcpy(&dst[dst_pos], &src[src_pos - literals], literals);
+        uint8_t token = min(literals, 0xf) << 4;
+        assert(dst_pos < dst_len);
+        dst[dst_pos] = token;
+        dst_pos += 1;
+
+        if (literals >= 15) {
+            uint32_t tmp = literals - 15;
+            while (tmp >= 255) {
+                assert(dst_pos < dst_len);
+                dst[dst_pos] = 255;
+                dst_pos += 1;
+                tmp -= 255;
+            }
+            assert(dst_pos < dst_len);
+            dst[dst_pos] = tmp;
+            dst_pos += 1;
+        }
+
+        size_t copy_pos = src_pos - literals;
+        assert(dst_pos + literals - 1 < dst_len);
+        memcpy(&dst[dst_pos], &src[copy_pos], literals);
         dst_pos += literals;
     }
 
@@ -199,9 +274,23 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     size_t dst_pos = 0;
 
     while (src_pos < src_len) {
-        uint32_t literals;
+        assert(src_pos < src_len);
+        uint8_t token = src[src_pos];
+        src_pos += 1;
 
-        src_pos += read_vbyte(src, src_pos, &literals);
+        uint32_t literals = token >> 4;
+        if (literals == 0xf) {
+            uint8_t read_more;
+            do {
+                assert(src_pos < src_len);
+                read_more = src[src_pos];
+                src_pos += 1;
+                literals += read_more;
+            } while (read_more == 0xff);
+        }
+
+        assert(dst_pos + literals - 1 < dst_len);
+        assert(src_pos + literals - 1 < src_len);
         memcpy(&dst[dst_pos], &src[src_pos], literals);
         dst_pos += literals;
         src_pos += literals;
@@ -209,13 +298,25 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         if (src_pos == src_len)
             break;
 
-        uint32_t factor_offset;
-        uint32_t factor_len;
+        uint16_t factor_offs;
+        assert(src_pos + sizeof(factor_offs) - 1 < src_len);
+        memcpy(&factor_offs, &src[src_pos], sizeof(factor_offs));
+        src_pos += sizeof(factor_offs);
 
-        src_pos += read_vbyte(src, src_pos, &factor_offset);
-        src_pos += read_vbyte(src, src_pos, &factor_len);
+        uint32_t factor_len = token & 0xf;
+        if (factor_len == 0xf) {
+            uint8_t read_more;
+            do {
+                assert(src_pos < src_len);
+                read_more = src[src_pos];
+                src_pos += 1;
+                factor_len += read_more;
+            } while (read_more == 0xff);
+        }
+        factor_len += 4;
 
-        size_t copy_pos = dst_pos - factor_offset;
+        size_t copy_pos = dst_pos - factor_offs;
+        assert(dst_pos + factor_len - 1 < dst_len);
         while (factor_len > 0) {
             dst[dst_pos] = dst[copy_pos];
             dst_pos += 1;
