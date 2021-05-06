@@ -20,7 +20,7 @@
 #else
 #   include <assert.h>
 #   include <stdio.h>
-#   define debug(...)                         \
+#   define debug(...)                       \
         do {                                \
             fprintf(stderr, "(%s:%d) - ",   \
                     __func__, __LINE__);    \
@@ -32,104 +32,209 @@
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) < (b)) ? (b) : (a))
 
-static size_t kkp_sa_len(size_t text_len)
+static inline size_t kkp_sa_len(size_t text_len)
 {
     return text_len + 2;
 }
 
-__attribute__((unused)) static size_t kkp2_phi_len(size_t text_len)
+static inline size_t kkp2_phi_len(size_t text_len)
 {
     return text_len + 1;
 }
 
-static size_t kkp3_psv_nsv_len(size_t text_len)
+static inline size_t kkp3_psv_nsv_len(size_t text_len)
 {
     return 2 * text_len;
 }
 
-__attribute__((unused)) static size_t write_vbyte(uint8_t *dst, size_t pos,
-        uint32_t value)
+static inline uint16_t read_u16(uint8_t *src, size_t pos)
 {
+    uint16_t val;
+    memcpy(&val, &src[pos], sizeof(val));
+    return val;
+}
+
+static inline uint64_t read_u64(uint8_t *src, size_t pos)
+{
+    uint64_t val;
+    memcpy(&val, &src[pos], sizeof(val));
+    return val;
+}
+
+static inline void write_u16(uint8_t *dst, size_t pos, uint16_t val)
+{
+    memcpy(&dst[pos], &val, sizeof(val));
+}
+
+static inline void copy(uint8_t *src, size_t src_pos, uint8_t *dst,
+        size_t dst_pos, size_t copy_len)
+{
+    memcpy(&dst[dst_pos], &src[src_pos], copy_len);
+}
+
+static inline void copy_baat(uint8_t *src, size_t src_pos, uint8_t *dst,
+        size_t dst_pos, size_t copy_len)
+{
+    while (copy_len > 0) {
+        dst[dst_pos] = src[src_pos];
+        dst_pos += 1;
+        src_pos += 1;
+        copy_len -= 1;
+    }
+}
+
+static inline size_t write_vbyte(uint8_t *dst, size_t dst_len, size_t pos,
+        uint32_t val)
+{
+#ifdef NDEBUG
+    (void)dst_len;
+#endif
+
     size_t orig_pos = pos;
 
-    while (value > 0x7f) {
-        dst[pos] = value & 0x7f;
+    while (val > 0x7f) {
+        assert(pos < dst_len);
+        dst[pos] = val & 0x7f;
         pos += 1;
-        value >>= 7;
+        val >>= 7;
     }
 
-    dst[pos] = value | 0x80;
+    assert(pos < dst_len);
+    dst[pos] = val | 0x80;
 
     return pos - orig_pos + 1;
 }
 
-__attribute__((unused)) static size_t read_vbyte(uint8_t *src, size_t pos, uint32_t *res)
+static inline size_t read_vbyte(uint8_t *src, size_t src_len, size_t pos,
+        uint32_t *res)
 {
-    uint32_t value = 0;
+#ifdef NDEBUG
+    (void)src_len;
+#endif
+
+    uint32_t val = 0;
     size_t vbyte_len = 0;
 
     while (src[pos] < 0x80) {
-        value += src[pos] << (7 * vbyte_len);
+        assert(pos < src_len);
+        val += src[pos] << (7 * vbyte_len);
         pos += 1;
         vbyte_len += 1;
     }
 
-    value += (src[pos] & 0x7f) << (7 * vbyte_len);
-    *res = value;
+    assert(pos < src_len);
+    val += (src[pos] & 0x7f) << (7 * vbyte_len);
+    *res = val;
 
     return vbyte_len + 1;
 }
 
-static size_t lcp_compare(uint8_t *text, size_t text_len, size_t pos1,
+static inline size_t write_lsic(uint8_t *dst, size_t dst_len, size_t pos,
+        uint32_t val)
+{
+#ifdef NDEBUG
+    (void)dst_len;
+#endif
+
+    size_t orig_pos = pos;
+
+    while (val >= 255) {
+        assert(pos < dst_len);
+        dst[pos] = 255;
+        pos += 1;
+        val -= 255;
+    }
+    assert(pos < dst_len);
+    dst[pos] = val;
+
+    return pos - orig_pos + 1;
+}
+
+static inline size_t read_lsic(uint8_t *src, size_t src_len, size_t pos,
+        uint32_t *res)
+{
+#ifdef NDEBUG
+    (void)src_len;
+#endif
+
+    uint32_t val = 0;
+    uint8_t read_more;
+    size_t orig_pos = pos;
+
+    do {
+        assert(pos < src_len);
+        read_more = src[pos];
+        pos += 1;
+        val += read_more;
+    } while (read_more == 0xff);
+
+    *res = val;
+
+    return pos - orig_pos;
+}
+
+static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t pos1,
         size_t pos2)
 {
     size_t len = 0;
 
-    /* @TODO this is inefficient, do something to it */
+    while (pos2 + len <= text_len - 8) {
+        uint64_t val1 = read_u64(text, pos1 + len);
+        uint64_t val2 = read_u64(text, pos2 + len);
+        uint64_t diff = val1 ^ val2;
+
+        if (diff != 0)
+            return len + (__builtin_ctzll(diff) >> 3);
+
+        len += 8;
+    }
+
     while (pos2 + len < text_len && text[pos1 + len] == text[pos2 + len])
         len += 1;
 
     return len;
 }
 
-static void lz_factor(uint8_t *text, size_t text_len, size_t pos, int32_t psv,
-        int32_t nsv, uint32_t *out_pos, uint32_t *out_len)
+static inline void lz_factor(uint8_t *text, size_t text_len, size_t text_pos,
+        int32_t psv, int32_t nsv, uint32_t *out_pos, uint32_t *out_len)
 {
-    size_t len = 0;
+    size_t factor_pos = text[text_pos];
+    size_t factor_len = 0;
 
-    /* @TODO this is ugly, do something to it */
-    if (nsv == -1 && psv == -1) {
-    } else if (nsv == -1) {
-        len += lcp_compare(text, text_len, psv, pos);
-        *out_pos = psv;
-    } else if (psv == -1) {
-        len += lcp_compare(text, text_len, nsv, pos);
-        *out_pos = nsv;
-    } else {
-        if (psv < nsv)
-            len += lcp_compare(text, text_len, psv, nsv);
-        else
-            len += lcp_compare(text, text_len, nsv, psv);
-        if (text[psv + len] == text[pos + len]) {
-            len += lcp_compare(text, text_len, psv + len, pos + len);
-            *out_pos = psv;
+    if (nsv != psv) {
+        if (nsv == -1) {
+            factor_pos = psv;
+            factor_len += lcp_cmp(text, text_len, psv, text_pos);
+        } else if (psv == -1) {
+            factor_pos = nsv;
+            factor_len += lcp_cmp(text, text_len, nsv, text_pos);
         } else {
-            len += lcp_compare(text, text_len, nsv + len, pos + len);
-            *out_pos = nsv;
+            factor_len += lcp_cmp(text, text_len, min(psv, nsv), max(psv, nsv));
+
+            if (text_pos + factor_len < text_len &&
+                text[psv + factor_len] == text[text_pos + factor_len]) {
+                factor_pos = psv;
+                factor_len += 1;
+                factor_len += lcp_cmp(text, text_len, psv + factor_len,
+                                      text_pos + factor_len);
+            } else {
+                factor_pos = nsv;
+                factor_len += lcp_cmp(text, text_len, nsv + factor_len,
+                                      text_pos + factor_len);
+            }
         }
     }
 
-    if (len == 0)
-        *out_pos = text[pos];
-
-    *out_len = len;
+    *out_pos = factor_pos;
+    *out_len = factor_len;
 }
 
 uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         size_t dst_len)
 {
-    /* @TODO add buffer boundary checks for memsafety */
+#ifdef NDEBUG
     (void)dst_len;
+#endif
 
     int32_t *sa;
     int32_t *psv_nsv;
@@ -188,40 +293,22 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             dst_pos += 1;
 
             if (literals >= 15) {
-                uint32_t tmp = literals - 15;
-                while (tmp >= 255) {
-                    assert(dst_pos < dst_len);
-                    dst[dst_pos] = 255;
-                    dst_pos += 1;
-                    tmp -= 255;
-                }
-                assert(dst_pos < dst_len);
-                dst[dst_pos] = tmp;
-                dst_pos += 1;
+                dst_pos += write_lsic(dst, dst_len, dst_pos, literals - 15);
             }
 
             size_t copy_pos = src_pos - literals;
             assert(dst_pos + literals - 1 < dst_len);
-            memcpy(&dst[dst_pos], &src[copy_pos], literals);
+            copy(src, copy_pos, dst, dst_pos, literals);
             dst_pos += literals;
 
             uint16_t factor_offs = src_pos - factor_pos;
             assert(factor_offs <= src_pos);
             assert(dst_pos + sizeof(factor_offs) - 1 < dst_len);
-            memcpy(&dst[dst_pos], &factor_offs, sizeof(factor_offs));
+            write_u16(dst, dst_pos, factor_offs);
             dst_pos += sizeof(factor_offs);
 
             if (factor_len - 4 >= 15) {
-                uint32_t tmp = factor_len - 15 - 4;
-                while (tmp >= 255) {
-                    assert(dst_pos < dst_len);
-                    dst[dst_pos] = 255;
-                    dst_pos += 1;
-                    tmp -= 255;
-                }
-                assert(dst_pos < dst_len);
-                dst[dst_pos] = tmp;
-                dst_pos += 1;
+                dst_pos += write_lsic(dst, dst_len, dst_pos, factor_len - 15 - 4);
             }
 
             literals = 0;
@@ -236,21 +323,12 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         dst_pos += 1;
 
         if (literals >= 15) {
-            uint32_t tmp = literals - 15;
-            while (tmp >= 255) {
-                assert(dst_pos < dst_len);
-                dst[dst_pos] = 255;
-                dst_pos += 1;
-                tmp -= 255;
-            }
-            assert(dst_pos < dst_len);
-            dst[dst_pos] = tmp;
-            dst_pos += 1;
+            dst_pos += write_lsic(dst, dst_len, dst_pos, literals - 15);
         }
 
         size_t copy_pos = src_pos - literals;
         assert(dst_pos + literals - 1 < dst_len);
-        memcpy(&dst[dst_pos], &src[copy_pos], literals);
+        copy(src, copy_pos, dst, dst_pos, literals);
         dst_pos += literals;
     }
 
@@ -267,31 +345,27 @@ clean:
 uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         size_t dst_len)
 {
-    /* @TODO add buffer boundary checks for memsafety */
+#ifdef NDEBUG
     (void)dst_len;
+#endif
 
     size_t src_pos = 0;
     size_t dst_pos = 0;
 
     while (src_pos < src_len) {
-        assert(src_pos < src_len);
         uint8_t token = src[src_pos];
         src_pos += 1;
 
         uint32_t literals = token >> 4;
         if (literals == 0xf) {
-            uint8_t read_more;
-            do {
-                assert(src_pos < src_len);
-                read_more = src[src_pos];
-                src_pos += 1;
-                literals += read_more;
-            } while (read_more == 0xff);
+            uint32_t extra;
+            src_pos += read_lsic(src, src_len, src_pos, &extra);
+            literals += extra;
         }
 
         assert(dst_pos + literals - 1 < dst_len);
         assert(src_pos + literals - 1 < src_len);
-        memcpy(&dst[dst_pos], &src[src_pos], literals);
+        copy(src, src_pos, dst, dst_pos, literals);
         dst_pos += literals;
         src_pos += literals;
 
@@ -300,29 +374,21 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
         uint16_t factor_offs;
         assert(src_pos + sizeof(factor_offs) - 1 < src_len);
-        memcpy(&factor_offs, &src[src_pos], sizeof(factor_offs));
+        factor_offs = read_u16(src, src_pos);
         src_pos += sizeof(factor_offs);
 
         uint32_t factor_len = token & 0xf;
         if (factor_len == 0xf) {
-            uint8_t read_more;
-            do {
-                assert(src_pos < src_len);
-                read_more = src[src_pos];
-                src_pos += 1;
-                factor_len += read_more;
-            } while (read_more == 0xff);
+            uint32_t extra;
+            src_pos += read_lsic(src, src_len, src_pos, &extra);
+            factor_len += extra;
         }
         factor_len += 4;
 
-        size_t copy_pos = dst_pos - factor_offs;
         assert(dst_pos + factor_len - 1 < dst_len);
-        while (factor_len > 0) {
-            dst[dst_pos] = dst[copy_pos];
-            dst_pos += 1;
-            copy_pos += 1;
-            factor_len -= 1;
-        }
+        assert(factor_offs <= dst_pos);
+        copy_baat(dst, dst_pos - factor_offs, dst, dst_pos, factor_len);
+        dst_pos += factor_len;
     }
 
     return (uint32_t)dst_pos;
