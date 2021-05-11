@@ -14,7 +14,7 @@
 
 #ifdef NDEBUG
 #   ifndef assert
-#       define assert(condition) ((void)0)
+#       define assert(condition) do {} while(0);
 #   endif
 #   define debug(...) do {} while(0);
 #else
@@ -229,6 +229,31 @@ static inline void lz_factor(uint8_t *text, size_t text_len, size_t text_pos,
     *out_len = factor_len;
 }
 
+static inline size_t lz4_cost(size_t literals, size_t factor_len)
+{
+    /*
+     * 1b for token
+     * 2b for factor offset
+     */
+    size_t cost = 1 + 2;
+
+    /*
+     * 1b for each literal
+     *
+     * +1b for each starting 255 literals starting from 14 literals (literal
+     * counts up to 14 can be encoded into token)
+     */
+    cost += literals + (literals - 14 + 255 - 1) / 255;
+
+    /*
+     * +1b for each starting 255 bytes of factor length starting from 18 bytes
+     * of factor length (factor lengths up to 18 can be encoded into token)
+     */
+    cost += (factor_len - 18 + 255 - 1) / 255;
+
+    return cost;
+}
+
 uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         size_t dst_len)
 {
@@ -236,17 +261,29 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     (void)dst_len;
 #endif
 
+    /* @TODO At least for now, block size must not exceed 64kB */
+    assert(src_len <= 65536);
+
     int32_t *sa;
     int32_t *psv_nsv;
     size_t sa_len = kkp_sa_len(src_len);
     size_t psv_nsv_len = kkp3_psv_nsv_len(src_len);
     uint32_t ret = 0;
+    uint16_t *moffs = malloc(src_len * sizeof(*moffs));
+    uint32_t *mlens = malloc(src_len * sizeof(*mlens));
 
     sa = malloc(sa_len * sizeof(*sa));
     psv_nsv = malloc(psv_nsv_len * sizeof(*psv_nsv));
+    moffs = malloc(src_len * sizeof(*moffs));
+    mlens = malloc(src_len * sizeof(*mlens));
 
     if (sa == NULL || psv_nsv == NULL) {
         debug("Memory allocation failed for SA or NSV/PSV");
+        goto clean;
+    }
+
+    if (moffs == NULL || mlens == NULL) {
+        debug("Memory allocation failed for match descriptors");
         goto clean;
     }
 
@@ -268,25 +305,34 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         sa[top] = sa[i];
     }
 
-    uint32_t literals = 1;
-    size_t src_pos = 1;
-    size_t dst_pos = 0;
-    while (src_pos < src_len) {
-        size_t addr = src_pos << 1;
-        int32_t psv = psv_nsv[addr];
-        int32_t nsv = psv_nsv[addr + 1];
+    moffs[0] = 0;
+    mlens[0] = 1;
+    for (size_t src_pos = 1; src_pos < src_len; src_pos++) {
+        int32_t psv = psv_nsv[2 * src_pos];
+        int32_t nsv = psv_nsv[1 + 2 * src_pos];
         uint32_t factor_pos;
         uint32_t factor_len;
 
-        /* Limit factor offset */
-        psv = src_pos - psv < 65536 ? psv : -1;
-        nsv = src_pos - nsv < 65536 ? nsv : -1;
         lz_factor(src, src_len, src_pos, psv, nsv, &factor_pos, &factor_len);
 
         if (factor_len < 4) {
-            literals += max(1, factor_len);
-            src_pos += max(1, factor_len);
+            moffs[src_pos] = 0;
+            mlens[src_pos] = 1;
         } else {
+            moffs[src_pos] = src_pos - factor_pos;
+            mlens[src_pos] = factor_len;
+        }
+    }
+
+    uint32_t literals = 0;
+    size_t src_pos = 0;
+    size_t dst_pos = 0;
+    while (src_pos < src_len) {
+        if (mlens[src_pos] == 1) {
+            literals += 1;
+            src_pos += 1;
+        } else {
+            uint32_t factor_len = mlens[src_pos];
             uint8_t token = (min(literals, 15) << 4) | min(factor_len - 4, 15);
             assert(dst_pos < dst_len);
             dst[dst_pos] = token;
@@ -301,7 +347,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             copy(src, copy_pos, dst, dst_pos, literals);
             dst_pos += literals;
 
-            uint16_t factor_offs = src_pos - factor_pos;
+            uint16_t factor_offs = moffs[src_pos];
             assert(factor_offs <= src_pos);
             assert(dst_pos + sizeof(factor_offs) - 1 < dst_len);
             write_u16(dst, dst_pos, factor_offs);
@@ -337,6 +383,8 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 clean:
     free(sa);
     free(psv_nsv);
+    free(moffs);
+    free(mlens);
 
     return ret;
 }
