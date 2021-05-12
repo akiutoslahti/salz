@@ -85,6 +85,19 @@ static inline void copy_baat(uint8_t *src, size_t src_pos, uint8_t *dst,
     }
 }
 
+static inline size_t vbyte_size(uint32_t val)
+{
+    if (val < (1u << 7))
+        return 1;
+    if (val < (1u << 14))
+        return 2;
+    if (val < (1u << 21))
+        return 3;
+    if (val < (1u << 28))
+        return 4;
+    return 5;
+}
+
 static inline size_t write_vbyte(uint8_t *dst, size_t dst_len, size_t pos,
         uint32_t val)
 {
@@ -263,15 +276,18 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     (void)dst_len;
 #endif
 
+#if 0
     /* @TODO At least for now, block size must not exceed 64kB */
     assert(src_len <= 65536);
+#endif
 
     int32_t *sa;
     int32_t *psv_nsv;
     size_t sa_len = kkp_sa_len(src_len);
     size_t psv_nsv_len = kkp3_psv_nsv_len(src_len);
     uint32_t ret = 0;
-    uint16_t *moffs;
+    //uint16_t *moffs;
+    uint32_t *moffs;
     uint32_t *mlens;
     size_t *costs;
 
@@ -336,9 +352,11 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         uint32_t factor_pos;
         uint32_t factor_len;
 
+#if 0
         /* Limit factor offset */
         psv = i - psv < 65536 ? psv : -1;
         nsv = i - nsv < 65536 ? nsv : -1;
+#endif
 
         lz_factor(src, src_len, i, psv, nsv, &factor_pos, &factor_len);
 
@@ -347,12 +365,17 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             costs[i] = lit_cost;
             mlens[i] = 1;
         } else {
-            size_t fac_len = factor_len;
-            size_t fac_cost = 1 + 2 + divup(factor_len - 18, 255) + costs[i + factor_len];
+            uint32_t fac_len = factor_len;
+            uint32_t fac_offs = i - factor_pos;
+            size_t fac_cost = 1 + vbyte_size(fac_offs) +
+                              divup(fac_len - 18, 255) +
+                              costs[i + fac_len];
 
 #if 0
             for (size_t j = factor_len - 1; j != 3; j--) {
-                size_t fac_cost_alt = 1 + 2 + divup(j - 18, 255) + costs[i + j];
+                size_t fac_cost_alt = 1 + vbyte_size(fac_offs) +
+                                      divup(j - 18, 255) +
+                                      costs[i + j];
                 if (fac_cost_alt < fac_cost) {
                     fac_len = j;
                     fac_cost = fac_cost_alt;
@@ -368,7 +391,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             } else {
                 /* encode factor */
                 costs[i] = fac_cost;
-                moffs[i] = i - factor_pos;
+                moffs[i] = fac_offs;
                 mlens[i] = fac_len;
                 lit_cost_inc = 15;
             }
@@ -398,11 +421,14 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             copy(src, copy_pos, dst, dst_pos, literals);
             dst_pos += literals;
 
+#if 0
             uint16_t factor_offs = moffs[src_pos];
             assert(factor_offs <= src_pos);
             assert(dst_pos + sizeof(factor_offs) - 1 < dst_len);
             write_u16(dst, dst_pos, factor_offs);
             dst_pos += sizeof(factor_offs);
+#endif
+            dst_pos += write_vbyte(dst, dst_len, dst_pos, moffs[src_pos]);
 
             if (factor_len - 4 >= 15) {
                 dst_pos += write_lsic(dst, dst_len, dst_pos, factor_len - 15 - 4);
@@ -472,10 +498,14 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         if (src_pos == src_len)
             break;
 
+#if 0
         uint16_t factor_offs;
         assert(src_pos + sizeof(factor_offs) - 1 < src_len);
         factor_offs = read_u16(src, src_pos);
         src_pos += sizeof(factor_offs);
+#endif
+        uint32_t factor_offs;
+        src_pos += read_vbyte(src, src_len, src_pos, &factor_offs);
 
         uint32_t factor_len = token & 0xf;
         if (factor_len == 0xf) {
