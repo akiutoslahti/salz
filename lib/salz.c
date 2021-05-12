@@ -32,6 +32,8 @@
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) < (b)) ? (b) : (a))
 
+#define divup(a, b) (((a) + (b) - 1) / (b))
+
 static inline size_t kkp_sa_len(size_t text_len)
 {
     return text_len + 2;
@@ -269,20 +271,22 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     size_t sa_len = kkp_sa_len(src_len);
     size_t psv_nsv_len = kkp3_psv_nsv_len(src_len);
     uint32_t ret = 0;
-    uint16_t *moffs = malloc(src_len * sizeof(*moffs));
-    uint32_t *mlens = malloc(src_len * sizeof(*mlens));
+    uint16_t *moffs;
+    uint32_t *mlens;
+    size_t *costs;
 
     sa = malloc(sa_len * sizeof(*sa));
     psv_nsv = malloc(psv_nsv_len * sizeof(*psv_nsv));
     moffs = malloc(src_len * sizeof(*moffs));
     mlens = malloc(src_len * sizeof(*mlens));
+    costs = malloc((src_len + 1) * sizeof(*costs));
 
     if (sa == NULL || psv_nsv == NULL) {
         debug("Memory allocation failed for SA or NSV/PSV");
         goto clean;
     }
 
-    if (moffs == NULL || mlens == NULL) {
+    if (moffs == NULL || mlens == NULL || costs == NULL) {
         debug("Memory allocation failed for match descriptors");
         goto clean;
     }
@@ -305,22 +309,69 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         sa[top] = sa[i];
     }
 
-    moffs[0] = 0;
+    size_t n = src_len;
+
+    costs[n] = 0;
+    costs[n - 1] = 1;
+    costs[n - 2] = 2;
+    costs[n - 3] = 3;
+
+    mlens[n - 1] = 1;
+    mlens[n - 2] = 1;
+    mlens[n - 3] = 1;
     mlens[0] = 1;
-    for (size_t src_pos = 1; src_pos < src_len; src_pos++) {
-        int32_t psv = psv_nsv[2 * src_pos];
-        int32_t nsv = psv_nsv[1 + 2 * src_pos];
+
+    size_t lit_cost_inc = 15;
+    for (size_t i = n - 4; i != 0; i--) {
+        size_t lit_cost = 1 + costs[i + 1];
+        lit_cost_inc -= 1;
+
+        if (lit_cost_inc == 0) {
+            lit_cost += 1;
+            lit_cost_inc = 255;
+        }
+
+        int32_t psv = psv_nsv[2 * i];
+        int32_t nsv = psv_nsv[1 + 2 * i];
         uint32_t factor_pos;
         uint32_t factor_len;
 
-        lz_factor(src, src_len, src_pos, psv, nsv, &factor_pos, &factor_len);
+        /* Limit factor offset */
+        psv = i - psv < 65536 ? psv : -1;
+        nsv = i - nsv < 65536 ? nsv : -1;
+
+        lz_factor(src, src_len, i, psv, nsv, &factor_pos, &factor_len);
 
         if (factor_len < 4) {
-            moffs[src_pos] = 0;
-            mlens[src_pos] = 1;
+            /* no match, must proceed with literal */
+            costs[i] = lit_cost;
+            mlens[i] = 1;
         } else {
-            moffs[src_pos] = src_pos - factor_pos;
-            mlens[src_pos] = factor_len;
+            size_t fac_len = factor_len;
+            size_t fac_cost = 1 + 2 + divup(factor_len - 18, 255) + costs[i + factor_len];
+
+#if 0
+            for (size_t j = factor_len - 1; j != 3; j--) {
+                size_t fac_cost_alt = 1 + 2 + divup(j - 18, 255) + costs[i + j];
+                if (fac_cost_alt < fac_cost) {
+                    fac_len = j;
+                    fac_cost = fac_cost_alt;
+                }
+            }
+#endif
+
+            /* @TODO should we prefer literal or a factor? */
+            if (lit_cost <= fac_cost) {
+                /* encode literal */
+                costs[i] = lit_cost;
+                mlens[i] = 1;
+            } else {
+                /* encode factor */
+                costs[i] = fac_cost;
+                moffs[i] = i - factor_pos;
+                mlens[i] = fac_len;
+                lit_cost_inc = 15;
+            }
         }
     }
 
@@ -385,6 +436,7 @@ clean:
     free(psv_nsv);
     free(moffs);
     free(mlens);
+    free(costs);
 
     return ret;
 }
