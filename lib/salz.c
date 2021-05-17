@@ -34,6 +34,15 @@
 
 #define divup(a, b) (((a) + (b) - 1) / (b))
 
+#ifdef ENABLE_STATS
+struct stats st;
+
+struct stats *get_stats(void)
+{
+    return &st;
+}
+#endif
+
 static inline size_t kkp_sa_len(size_t text_len)
 {
     return text_len + 2;
@@ -74,7 +83,7 @@ static inline void copy(uint8_t *src, size_t src_pos, uint8_t *dst,
     memcpy(&dst[dst_pos], &src[src_pos], copy_len);
 }
 
-static inline void copy_baat(uint8_t *src, size_t src_pos, uint8_t *dst,
+static inline void copy_oaat(uint8_t *src, size_t src_pos, uint8_t *dst,
         size_t dst_pos, size_t copy_len)
 {
     while (copy_len > 0) {
@@ -231,31 +240,6 @@ static inline void lz_factor(uint8_t *text, size_t text_len, size_t text_pos,
     *out_len = factor_len;
 }
 
-static inline size_t lz4_cost(size_t literals, size_t factor_len)
-{
-    /*
-     * 1b for token
-     * 2b for factor offset
-     */
-    size_t cost = 1 + 2;
-
-    /*
-     * 1b for each literal
-     *
-     * +1b for each starting 255 literals starting from 14 literals (literal
-     * counts up to 14 can be encoded into token)
-     */
-    cost += literals + (literals - 14 + 255 - 1) / 255;
-
-    /*
-     * +1b for each starting 255 bytes of factor length starting from 18 bytes
-     * of factor length (factor lengths up to 18 can be encoded into token)
-     */
-    cost += (factor_len - 18 + 255 - 1) / 255;
-
-    return cost;
-}
-
 uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         size_t dst_len)
 {
@@ -291,10 +275,19 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         goto clean;
     }
 
+#ifdef ENABLE_STATS
+    uint64_t clock = get_time_ns();
+#endif
+
     if (divsufsort(src, sa + 1, src_len) != 0) {
         debug("divsufsort failed");
         goto clean;
     }
+
+#ifdef ENABLE_STATS
+    st.sa_time += get_time_ns() - clock;
+    clock = get_time_ns();
+#endif
 
     sa[0] = -1;
     sa[src_len + 1] = -1;
@@ -308,6 +301,11 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         top += 1;
         sa[top] = sa[i];
     }
+
+#ifdef ENABLE_STATS
+    st.psv_nsv_time += get_time_ns() - clock;
+    clock = get_time_ns();
+#endif
 
     size_t n = src_len;
 
@@ -375,6 +373,11 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         }
     }
 
+#ifdef ENABLE_STATS
+    st.mincost_time += get_time_ns() - clock;
+    clock = get_time_ns();
+#endif
+
     uint32_t literals = 0;
     size_t src_pos = 0;
     size_t dst_pos = 0;
@@ -428,6 +431,10 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         copy(src, copy_pos, dst, dst_pos, literals);
         dst_pos += literals;
     }
+
+#ifdef ENABLE_STATS
+    st.encode_time += get_time_ns() - clock;
+#endif
 
     ret = (uint32_t)dst_pos;
 
@@ -487,7 +494,7 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
         assert(dst_pos + factor_len - 1 < dst_len);
         assert(factor_offs <= dst_pos);
-        copy_baat(dst, dst_pos - factor_offs, dst, dst_pos, factor_len);
+        copy_oaat(dst, dst_pos - factor_offs, dst, dst_pos, factor_len);
         dst_pos += factor_len;
     }
 

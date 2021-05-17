@@ -7,6 +7,9 @@
  * See file LICENSE or a copy at <https://opensource.org/licenses/MIT>.
  */
 
+#ifndef SALZ_COMMON_H
+#define SALZ_COMMON_H
+
 #include <stdint.h>
 #include <time.h>
 
@@ -19,9 +22,11 @@ static uint64_t get_time_ns(void)
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
     {
         /* @TODO externalize printing error to caller */
-        perror("clock_gettime");
+        //perror("clock_gettime");
         return 0;
     }
 
-    return ts.tv_sec * 1000000000 + ts.tv_nsec;
+    return ts.tv_sec * NS_IN_SEC + ts.tv_nsec;
 }
+
+#endif /* !SALZ_COMMON_H */

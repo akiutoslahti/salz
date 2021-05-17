@@ -20,6 +20,95 @@
 
 #define DEFAULT_LOG2_BLOCK_SIZE 16
 
+static int compress_fname(char *in_fname, char *out_fname,
+        uint32_t log2_block_size)
+{
+    FILE *in_stream = NULL;
+    FILE *out_stream = NULL;
+    uint8_t *src_buf = NULL;
+    uint8_t *dst_buf = NULL;
+    uint32_t block_size;
+    size_t src_len;
+    size_t dst_len;
+    size_t read_len;
+    size_t in_fsize = 0;
+    size_t out_fsize = 0;
+    int ret = 0;
+    uint64_t clock;
+
+    block_size = 1 << log2_block_size;
+    src_len = block_size;
+    /* @TODO formulate maximum compressed size better */
+    dst_len = 2 * block_size;
+
+    if ((in_stream = fopen(in_fname, "r")) == NULL) {
+        perror("Input file could not be opened");
+        goto fail;
+    }
+
+    if ((out_stream = fopen(out_fname, "w")) == NULL) {
+        perror("Output file could not be opened");
+        goto fail;
+    }
+
+    src_buf = malloc(src_len);
+    dst_buf = malloc(dst_len);
+
+    if (src_buf == NULL || dst_buf == NULL)
+        goto fail;
+
+    clock = get_time_ns();
+    if (fwrite(&block_size, sizeof(block_size), 1, out_stream) == 0) {
+        /* @TODO add error ? */
+    }
+    out_fsize += sizeof(block_size);
+    while ((read_len = fread(src_buf, 1, src_len, in_stream)) != 0) {
+        in_fsize += read_len;
+        uint32_t encoded_len = salz_encode_default(src_buf, read_len, dst_buf,
+                                                   dst_len);
+
+        if (encoded_len == 0) {
+            /* @TODO add error ? */
+            goto fail;
+        }
+
+        if (fwrite(&encoded_len, sizeof(encoded_len), 1, out_stream) == 0 ||
+            fwrite(dst_buf, 1, encoded_len, out_stream) != encoded_len) {
+            /* @TODO add error ? */
+            goto fail;
+        }
+        out_fsize += encoded_len;
+    }
+    clock = get_time_ns() - clock;
+
+    fprintf(stdout, "Compressed %zu bytes into %zu bytes (ratio: %.2f) in %.2f seconds\n",
+            in_fsize, out_fsize, 1.0 * in_fsize / out_fsize, 1.0 * clock / NS_IN_SEC);
+
+#ifdef ENABLE_STATS
+    struct stats *st = get_stats();
+
+    fprintf(stderr, "SACA time: %f, PSV/NSV time: %f, DP mincost time: %f, "
+                    "encode time: %f\n", 1.0 * st->sa_time / NS_IN_SEC,
+                    1.0 * st->psv_nsv_time / NS_IN_SEC,
+                    1.0 * st->mincost_time / NS_IN_SEC,
+                    1.0 * st->encode_time / NS_IN_SEC);
+#endif
+
+exit:
+    if (in_stream != NULL)
+        fclose(in_stream);
+    if (out_stream != NULL)
+        fclose(out_stream);
+    free(src_buf);
+    free(dst_buf);
+
+    return ret;
+
+fail:
+    ret = -1;
+    goto exit;
+}
+
 static int decompress_fname(char *in_fname, char *out_fname)
 {
     FILE *in_stream = NULL;
@@ -84,85 +173,6 @@ static int decompress_fname(char *in_fname, char *out_fname)
 
     fprintf(stdout, "Decompressed %zu bytes in %.2f seconds\n",
             out_fsize, 1.0 * clock / NS_IN_SEC);
-
-exit:
-    if (in_stream != NULL)
-        fclose(in_stream);
-    if (out_stream != NULL)
-        fclose(out_stream);
-    free(src_buf);
-    free(dst_buf);
-
-    return ret;
-
-fail:
-    ret = -1;
-    goto exit;
-}
-
-static int compress_fname(char *in_fname, char *out_fname,
-        uint32_t log2_block_size)
-{
-    FILE *in_stream = NULL;
-    FILE *out_stream = NULL;
-    uint8_t *src_buf = NULL;
-    uint8_t *dst_buf = NULL;
-    uint32_t block_size;
-    size_t src_len;
-    size_t dst_len;
-    size_t read_len;
-    size_t in_fsize = 0;
-    size_t out_fsize = 0;
-    int ret = 0;
-    uint64_t clock;
-
-    block_size = 1 << log2_block_size;
-    src_len = block_size;
-    /* @TODO formulate maximum compressed size better */
-    dst_len = 2 * block_size;
-
-    if ((in_stream = fopen(in_fname, "r")) == NULL) {
-        perror("Input file could not be opened");
-        goto fail;
-    }
-
-    if ((out_stream = fopen(out_fname, "w")) == NULL) {
-        perror("Output file could not be opened");
-        goto fail;
-    }
-
-    src_buf = malloc(src_len);
-    dst_buf = malloc(dst_len);
-
-    if (src_buf == NULL || dst_buf == NULL)
-        goto fail;
-
-    clock = get_time_ns();
-    if (fwrite(&block_size, sizeof(block_size), 1, out_stream) == 0) {
-        /* @TODO add error ? */
-    }
-    out_fsize += sizeof(block_size);
-    while ((read_len = fread(src_buf, 1, src_len, in_stream)) != 0) {
-        in_fsize += read_len;
-        uint32_t encoded_len = salz_encode_default(src_buf, read_len, dst_buf,
-                                                   dst_len);
-
-        if (encoded_len == 0) {
-            /* @TODO add error ? */
-            goto fail;
-        }
-
-        if (fwrite(&encoded_len, sizeof(encoded_len), 1, out_stream) == 0 ||
-            fwrite(dst_buf, 1, encoded_len, out_stream) != encoded_len) {
-            /* @TODO add error ? */
-            goto fail;
-        }
-        out_fsize += encoded_len;
-    }
-    clock = get_time_ns() - clock;
-
-    fprintf(stdout, "Compressed %zu bytes into %zu bytes (ratio: %.2f) in %.2f seconds\n",
-            in_fsize, out_fsize, 1.0 * in_fsize / out_fsize, 1.0 * clock / NS_IN_SEC);
 
 exit:
     if (in_stream != NULL)
