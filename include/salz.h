@@ -19,9 +19,8 @@
 struct stats {
     uint64_t sa_time;
     uint64_t psv_nsv_time;
-    uint64_t mincost_time;
     uint64_t factor_time;
-    uint64_t cmp_time;
+    uint64_t mincost_time;
     uint64_t encode_time;
 };
 

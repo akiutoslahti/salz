@@ -87,11 +87,11 @@ static int compress_fname(char *in_fname, char *out_fname,
 #ifdef ENABLE_STATS
     struct stats *st = get_stats();
 
-    fprintf(stderr, "SACA time: %f, PSV/NSV time: %f, DP mincost time: %f, "
-                    "encode time: %f\n", 1.0 * st->sa_time / NS_IN_SEC,
-                    1.0 * st->psv_nsv_time / NS_IN_SEC,
-                    1.0 * st->mincost_time / NS_IN_SEC,
-                    1.0 * st->encode_time / NS_IN_SEC);
+    fprintf(stderr, "SACA time: %f, PSV/NSV time: %f, LZ factor time: %f, "
+            "DP mincost time: %f, encode time: %f\n",
+            1.0 * st->sa_time / NS_IN_SEC, 1.0 * st->psv_nsv_time / NS_IN_SEC,
+            1.0 * st->factor_time / NS_IN_SEC, 1.0 * st->mincost_time / NS_IN_SEC,
+            1.0 * st->encode_time / NS_IN_SEC);
 #endif
 
 exit:
