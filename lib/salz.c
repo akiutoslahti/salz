@@ -173,11 +173,17 @@ static inline size_t read_lsic(uint8_t *src, size_t src_len, size_t pos,
     return pos - orig_pos;
 }
 
-static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t pos1,
-        size_t pos2)
-{
-    size_t len = 0;
+struct lz_factor_ctx {
+    int32_t ppsv;
+    size_t ppsv_len;
+    int32_t pnsv;
+    size_t pnsv_len;
+};
 
+static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
+        size_t pos1, size_t pos2)
+{
+    size_t len = common_len;
     while (pos2 + len <= text_len - 8) {
         uint64_t val1 = read_u64(text, pos1 + len);
         uint64_t val2 = read_u64(text, pos2 + len);
@@ -195,38 +201,26 @@ static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t pos1,
     return len;
 }
 
-static inline void lz_factor(uint8_t *text, size_t text_len, size_t text_pos,
-        int32_t psv, int32_t nsv, uint32_t *out_pos, uint32_t *out_len)
+static inline void lz_factor(struct lz_factor_ctx *ctx, uint8_t *text,
+        size_t text_len, size_t text_pos, int32_t psv, int32_t nsv,
+        uint32_t *out_pos, uint32_t *out_len)
 {
-    size_t factor_pos = text[text_pos];
-    size_t factor_len = 0;
+    size_t psv_len = 0;
+    size_t nsv_len = 0;
 
-    if (nsv != psv) {
-        if (nsv == -1) {
-            factor_pos = psv;
-            factor_len += lcp_cmp(text, text_len, psv, text_pos);
-        } else if (psv == -1) {
-            factor_pos = nsv;
-            factor_len += lcp_cmp(text, text_len, nsv, text_pos);
-        } else {
-            factor_len += lcp_cmp(text, text_len, min(psv, nsv), max(psv, nsv));
+    if (psv != -1)
+        psv_len = lcp_cmp(text, text_len, max(0, (int)ctx->ppsv_len - 1), psv, text_pos);
 
-            if (text_pos + factor_len < text_len &&
-                text[psv + factor_len] == text[text_pos + factor_len]) {
-                factor_pos = psv;
-                factor_len += 1;
-                factor_len += lcp_cmp(text, text_len, psv + factor_len,
-                                      text_pos + factor_len);
-            } else {
-                factor_pos = nsv;
-                factor_len += lcp_cmp(text, text_len, nsv + factor_len,
-                                      text_pos + factor_len);
-            }
-        }
-    }
+    if (nsv != -1)
+        nsv_len = lcp_cmp(text, text_len, max(0, (int)ctx->pnsv_len - 1), nsv, text_pos);
 
-    *out_pos = factor_pos;
-    *out_len = factor_len;
+    *out_pos = psv_len > nsv_len ? psv : nsv;
+    *out_len = max(psv_len, nsv_len);
+
+    ctx->ppsv = psv;
+    ctx->ppsv_len = psv_len;
+    ctx->pnsv = nsv;
+    ctx->pnsv_len = nsv_len;
 }
 
 static inline size_t lz4_cost(size_t literals, size_t factor_len)
@@ -305,6 +299,8 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         sa[top] = sa[i];
     }
 
+    struct lz_factor_ctx ctx = { -1, 0, -1, 0 };
+
     moffs[0] = 0;
     mlens[0] = 1;
     for (size_t src_pos = 1; src_pos < src_len; src_pos++) {
@@ -313,7 +309,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         uint32_t factor_pos;
         uint32_t factor_len;
 
-        lz_factor(src, src_len, src_pos, psv, nsv, &factor_pos, &factor_len);
+        lz_factor(&ctx, src, src_len, src_pos, psv, nsv, &factor_pos, &factor_len);
 
         if (factor_len < 4) {
             moffs[src_pos] = 0;
