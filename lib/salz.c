@@ -26,7 +26,7 @@
                     __func__, __LINE__);    \
             fprintf(stderr, __VA_ARGS__);   \
             fprintf(stderr, "\n");          \
-        } while (0);
+        } while (0)
 #endif
 
 #define min(a, b) (((a) < (b)) ? (a) : (b))
@@ -37,12 +37,21 @@
 #define unused(var) ((void)var)
 
 #ifdef ENABLE_STATS
-struct stats st;
+    struct stats st;
 
-struct stats *get_stats(void)
-{
-    return &st;
-}
+    struct stats *get_stats(void)
+    {
+        return &st;
+    }
+
+    static uint64_t time_ns;
+
+#   define start_clock() do { time_ns = get_time_ns(); } while(0)
+#   define increment_clock(dst)             \
+        do {                                \
+            dst += get_time_ns() - time_ns; \
+            time_ns = get_time_ns();        \
+        } while (0)
 #endif
 
 static inline uint16_t read_u16(uint8_t *src, size_t pos)
@@ -277,8 +286,8 @@ static inline void lz_factor(struct lz_factor_ctx *ctx, uint8_t *text,
         nsv_len = lcp_cmp(text, text_len, common_len, ctx->nsv, pos);
     }
 
-    *out_offs = pos - (psv_len > nsv_len ? ctx->psv : ctx->nsv);
-    *out_len = max(psv_len, nsv_len);
+    *out_offs = (int32_t)(pos - (psv_len > nsv_len ? ctx->psv : ctx->nsv));
+    *out_len = (int32_t)max(psv_len, nsv_len);
 
     ctx->prev_psv = ctx->psv;
     ctx->prev_psv_len = psv_len;
@@ -295,23 +304,20 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
     int32_t *sa;
     int32_t *aux;
-    size_t *costs;
     size_t sa_len = src_len + 2;
-    size_t aux_len = 2 * src_len;
-    size_t costs_len = src_len + 1;
+    size_t aux_len = 3 * (src_len + 1);
     uint32_t ret = 0;
 
     sa = malloc(sa_len * sizeof(*sa));
     aux = malloc(aux_len * sizeof(*aux));
-    costs = malloc(costs_len * sizeof(*costs));
 
-    if (sa == NULL || aux == NULL || costs == NULL) {
+    if (sa == NULL || aux == NULL) {
         debug("Memory allocation failed");
         goto clean;
     }
 
 #ifdef ENABLE_STATS
-    uint64_t clock = get_time_ns();
+    start_clock();
 #endif
 
     if (divsufsort(src, sa + 1, src_len) != 0) {
@@ -320,17 +326,15 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     }
 
 #ifdef ENABLE_STATS
-    st.sa_time += get_time_ns() - clock;
-    clock = get_time_ns();
+    increment_clock(st.sa_time);
 #endif
 
     sa[0] = -1;
     sa[src_len + 1] = -1;
     for (size_t top = 0, i = 1; i < sa_len; i++) {
         while (sa[top] > sa[i]) {
-            size_t addr = sa[top] << 1;
-            aux[addr] = sa[top - 1];
-            aux[addr + 1] = sa[i];
+            aux[0 + 3 * sa[top]] = sa[top - 1];
+            aux[1 + 3 * sa[top]] = sa[i];
             top -= 1;
         }
         top += 1;
@@ -338,65 +342,63 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     }
 
 #ifdef ENABLE_STATS
-    st.psv_nsv_time += get_time_ns() - clock;
-    clock = get_time_ns();
+    increment_clock(st.psv_nsv_time);
 #endif
 
     struct lz_factor_ctx ctx = { -1, -1, 0, -1, -1, 0 };
 
     aux[1] = 1;
     for (size_t src_pos = 1; src_pos < src_len; src_pos++) {
-        ctx.psv = aux[0 + 2 * src_pos];
-        ctx.nsv = aux[1 + 2 * src_pos];
+        ctx.psv = aux[0 + 3 * src_pos];
+        ctx.nsv = aux[1 + 3 * src_pos];
 
-        lz_factor(&ctx, src, src_len, src_pos, &aux[0 + 2 * src_pos], &aux[1 + 2 * src_pos]);
+        lz_factor(&ctx, src, src_len, src_pos, &aux[0 + 3 * src_pos],
+                  &aux[1 + 3 * src_pos]);
     }
 
 #ifdef ENABLE_STATS
-    st.factor_time += get_time_ns() - clock;
-    clock = get_time_ns();
+    increment_clock(st.factor_time);
 #endif
 
-    costs[src_len] = 0;
-    size_t literal_cost_inc = 15;
+    aux[2 + 3 * src_len] = 0;
+    uint32_t literal_inc_cnt = 15;
     for (size_t src_pos = src_len - 1; src_pos > 0; src_pos--) {
-        size_t cost = 1 + costs[src_pos + 1];
-        literal_cost_inc -= 1;
+        int32_t cost = 1 + aux[2 + 3 * (src_pos + 1)];
+        literal_inc_cnt -= 1;
 
-        if (literal_cost_inc == 0) {
+        if (literal_inc_cnt == 0) {
             cost += 1;
-            literal_cost_inc = 255;
+            literal_inc_cnt = 255;
         }
 
-        uint32_t factor_len = aux[1 + 2 * src_pos];
+        int32_t factor_len = aux[1 + 3 * src_pos];
         factor_len = factor_len < 4 ? 1 : factor_len;
 
         if (factor_len >= 4) {
-            size_t alt_cost = 1 + vbyte_size(aux[0 + 2 * src_pos]) +
-                              divup(factor_len - 18, 255) +
-                              costs[src_pos + factor_len];
+            int32_t alt_cost = 1 + vbyte_size(aux[0 + 3 * src_pos]) +
+                               divup(factor_len - 18, 255) +
+                               aux[2 + 3 * (src_pos + factor_len)];
 
             if (cost <= alt_cost) {
                 factor_len = 1;
             } else {
                 cost = alt_cost;
-                literal_cost_inc = 15;
+                literal_inc_cnt = 15;
             }
         }
-        aux[1 + 2 * src_pos] = factor_len;
-        costs[src_pos] = cost;
+        aux[1 + 3 * src_pos] = factor_len;
+        aux[2 + 3 * src_pos] = cost;
     }
 
 #ifdef ENABLE_STATS
-    st.mincost_time += get_time_ns() - clock;
-    clock = get_time_ns();
+    increment_clock(st.mincost_time);
 #endif
 
     uint32_t literals = 0;
     size_t src_pos = 0;
     size_t dst_pos = 0;
     while (src_pos < src_len) {
-        uint32_t factor_len = aux[1 + 2 * src_pos];
+        uint32_t factor_len = (uint32_t)aux[1 + 3 * src_pos];
         if (factor_len == 1) {
             literals += 1;
             src_pos += 1;
@@ -414,7 +416,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             copy(src, copy_pos, dst, dst_pos, literals);
             dst_pos += literals;
 
-            uint32_t factor_offs = aux[2 * src_pos];
+            uint32_t factor_offs = (uint32_t)aux[0 + 3 * src_pos];
             assert(factor_offs <= src_pos);
             dst_pos += write_vbyte(dst, dst_len, dst_pos, factor_offs);
 
@@ -443,7 +445,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     }
 
 #ifdef ENABLE_STATS
-    st.encode_time += get_time_ns() - clock;
+    increment_clock(st.encode_time);
 #endif
 
     ret = (uint32_t)dst_pos;
@@ -451,7 +453,6 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 clean:
     free(sa);
     free(aux);
-    free(costs);
 
     return ret;
 }
