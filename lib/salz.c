@@ -248,11 +248,15 @@ struct lz_factor_ctx {
     size_t prev_nsv_len;
 };
 
+//#define CMP_FASTER
+//#define CMP_LESS
+
 static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
         size_t pos1, size_t pos2)
 {
     size_t len = common_len;
 
+#ifdef CMP_FASTER
     while (pos2 + len <= text_len - 8) {
         uint64_t val1 = read_u64(text, pos1 + len);
         uint64_t val2 = read_u64(text, pos2 + len);
@@ -263,6 +267,7 @@ static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
 
         len += 8;
     }
+#endif
 
     while (pos2 + len < text_len && text[pos1 + len] == text[pos2 + len])
         len += 1;
@@ -273,6 +278,7 @@ static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
 static inline void lz_factor(struct lz_factor_ctx *ctx, uint8_t *text,
         size_t text_len, size_t pos, int32_t *out_offs, int32_t *out_len)
 {
+#ifdef CMP_LESS
     size_t psv_len = 0;
     size_t nsv_len = 0;
 
@@ -293,6 +299,35 @@ static inline void lz_factor(struct lz_factor_ctx *ctx, uint8_t *text,
     ctx->prev_psv_len = psv_len;
     ctx->prev_nsv = ctx->nsv;
     ctx->prev_nsv_len = nsv_len;
+#else
+    size_t factor_pos = pos;
+    size_t factor_len = 0;
+
+    if (ctx->nsv != ctx->psv) {
+        if (ctx->nsv == -1) {
+            factor_pos = ctx->psv;
+            factor_len += lcp_cmp(text, text_len, 0, ctx->psv, pos);
+        } else if (ctx->psv == -1) {
+            factor_pos = ctx->nsv;
+            factor_len += lcp_cmp(text, text_len, 0, ctx->nsv, pos);
+        } else {
+            factor_len += lcp_cmp(text, text_len, 0, min(ctx->psv, ctx->nsv),
+                                  max(ctx->psv, ctx->nsv));
+
+            if (pos + factor_len < text_len &&
+                text[ctx->psv + factor_len] == text[pos + factor_len]) {
+                factor_pos = ctx->psv;
+                factor_len += 1;
+                factor_len = lcp_cmp(text, text_len, factor_len, ctx->psv, pos);
+            } else {
+                factor_pos = ctx->nsv;
+                factor_len = lcp_cmp(text, text_len, factor_len, ctx->nsv, pos);
+            }
+        }
+    }
+    *out_offs = pos - factor_pos;
+    *out_len = factor_len;
+#endif
 }
 
 uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
