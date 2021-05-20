@@ -45,21 +45,6 @@ struct stats *get_stats(void)
 }
 #endif
 
-static inline size_t kkp_sa_len(size_t text_len)
-{
-    return text_len + 2;
-}
-
-static inline size_t kkp2_phi_len(size_t text_len)
-{
-    return text_len + 1;
-}
-
-static inline size_t kkp3_psv_nsv_len(size_t text_len)
-{
-    return 2 * text_len;
-}
-
 static inline uint16_t read_u16(uint8_t *src, size_t pos)
 {
     uint16_t val;
@@ -246,10 +231,12 @@ static inline size_t read_lsic(uint8_t *src, size_t src_len, size_t pos,
 }
 
 struct lz_factor_ctx {
-    int32_t ppsv;
-    size_t ppsv_len;
-    int32_t pnsv;
-    size_t pnsv_len;
+    int32_t psv;
+    int32_t prev_psv;
+    size_t prev_psv_len;
+    int32_t nsv;
+    int32_t prev_nsv;
+    size_t prev_nsv_len;
 };
 
 static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
@@ -275,24 +262,28 @@ static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
 }
 
 static inline void lz_factor(struct lz_factor_ctx *ctx, uint8_t *text,
-        size_t text_len, size_t text_pos, int32_t psv, int32_t nsv,
-        uint32_t *out_pos, uint32_t *out_len)
+        size_t text_len, size_t pos, int32_t *out_offs, int32_t *out_len)
 {
     size_t psv_len = 0;
     size_t nsv_len = 0;
-    if (psv != -1)
-        psv_len = lcp_cmp(text, text_len, max(0, (int)ctx->ppsv_len - 1), psv, text_pos);
 
-    if (nsv != -1)
-        nsv_len = lcp_cmp(text, text_len, max(0, (int)ctx->pnsv_len - 1), nsv, text_pos);
+    if (ctx->psv != -1) {
+        size_t common_len = ctx->prev_psv_len != 0 ? ctx->prev_psv_len - 1 : 0;
+        psv_len = lcp_cmp(text, text_len, common_len, ctx->psv, pos);
+    }
 
-    *out_pos = psv_len > nsv_len ? psv : nsv;
+    if (ctx->nsv != -1) {
+        size_t common_len = ctx->prev_nsv_len != 0 ? ctx->prev_nsv_len - 1 : 0;
+        nsv_len = lcp_cmp(text, text_len, common_len, ctx->nsv, pos);
+    }
+
+    *out_offs = pos - (psv_len > nsv_len ? ctx->psv : ctx->nsv);
     *out_len = max(psv_len, nsv_len);
 
-    ctx->ppsv = psv;
-    ctx->ppsv_len = psv_len;
-    ctx->pnsv = nsv;
-    ctx->pnsv_len = nsv_len;
+    ctx->prev_psv = ctx->psv;
+    ctx->prev_psv_len = psv_len;
+    ctx->prev_nsv = ctx->nsv;
+    ctx->prev_nsv_len = nsv_len;
 }
 
 uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
@@ -303,27 +294,19 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 #endif
 
     int32_t *sa;
-    int32_t *psv_nsv;
-    size_t sa_len = kkp_sa_len(src_len);
-    size_t psv_nsv_len = kkp3_psv_nsv_len(src_len);
-    uint32_t ret = 0;
-    uint32_t *moffs;
-    uint32_t *mlens;
+    int32_t *aux;
     size_t *costs;
+    size_t sa_len = src_len + 2;
+    size_t aux_len = 2 * src_len;
+    size_t costs_len = src_len + 1;
+    uint32_t ret = 0;
 
     sa = malloc(sa_len * sizeof(*sa));
-    psv_nsv = malloc(psv_nsv_len * sizeof(*psv_nsv));
-    moffs = malloc(src_len * sizeof(*moffs));
-    mlens = malloc(src_len * sizeof(*mlens));
-    costs = malloc((src_len + 1) * sizeof(*costs));
+    aux = malloc(aux_len * sizeof(*aux));
+    costs = malloc(costs_len * sizeof(*costs));
 
-    if (sa == NULL || psv_nsv == NULL) {
-        debug("Memory allocation failed for SA or NSV/PSV");
-        goto clean;
-    }
-
-    if (moffs == NULL || mlens == NULL || costs == NULL) {
-        debug("Memory allocation failed for match descriptors");
+    if (sa == NULL || aux == NULL || costs == NULL) {
+        debug("Memory allocation failed");
         goto clean;
     }
 
@@ -346,8 +329,8 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     for (size_t top = 0, i = 1; i < sa_len; i++) {
         while (sa[top] > sa[i]) {
             size_t addr = sa[top] << 1;
-            psv_nsv[addr] = sa[top - 1];
-            psv_nsv[addr + 1] = sa[i];
+            aux[addr] = sa[top - 1];
+            aux[addr + 1] = sa[i];
             top -= 1;
         }
         top += 1;
@@ -359,21 +342,14 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     clock = get_time_ns();
 #endif
 
-    size_t n = src_len;
+    struct lz_factor_ctx ctx = { -1, -1, 0, -1, -1, 0 };
 
-    struct lz_factor_ctx ctx = { -1, 0, -1, 0 };
+    aux[1] = 1;
+    for (size_t src_pos = 1; src_pos < src_len; src_pos++) {
+        ctx.psv = aux[0 + 2 * src_pos];
+        ctx.nsv = aux[1 + 2 * src_pos];
 
-    mlens[0] = 1;
-    for (size_t i = 1; i < n; i++) {
-        int32_t psv = psv_nsv[2 * i];
-        int32_t nsv = psv_nsv[1 + 2 * i];
-        uint32_t factor_pos;
-        uint32_t factor_len;
-
-        lz_factor(&ctx, src, src_len, i, psv, nsv, &factor_pos, &factor_len);
-
-        mlens[i] = factor_len;
-        moffs[i] = i - factor_pos;
+        lz_factor(&ctx, src, src_len, src_pos, &aux[0 + 2 * src_pos], &aux[1 + 2 * src_pos]);
     }
 
 #ifdef ENABLE_STATS
@@ -381,10 +357,10 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     clock = get_time_ns();
 #endif
 
-    costs[n] = 0;
+    costs[src_len] = 0;
     size_t literal_cost_inc = 15;
-    for (size_t i = n - 1; i != 0; i--) {
-        size_t cost = 1 + costs[i + 1];
+    for (size_t src_pos = src_len - 1; src_pos > 0; src_pos--) {
+        size_t cost = 1 + costs[src_pos + 1];
         literal_cost_inc -= 1;
 
         if (literal_cost_inc == 0) {
@@ -392,12 +368,13 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             literal_cost_inc = 255;
         }
 
-        uint32_t factor_len = mlens[i] < 4 ? 1 : mlens[i];
+        uint32_t factor_len = aux[1 + 2 * src_pos];
+        factor_len = factor_len < 4 ? 1 : factor_len;
 
         if (factor_len >= 4) {
-            size_t alt_cost = 1 + vbyte_size(moffs[i]) +
+            size_t alt_cost = 1 + vbyte_size(aux[0 + 2 * src_pos]) +
                               divup(factor_len - 18, 255) +
-                              costs[i + factor_len];
+                              costs[src_pos + factor_len];
 
             if (cost <= alt_cost) {
                 factor_len = 1;
@@ -406,8 +383,8 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
                 literal_cost_inc = 15;
             }
         }
-        mlens[i] = factor_len;
-        costs[i] = cost;
+        aux[1 + 2 * src_pos] = factor_len;
+        costs[src_pos] = cost;
     }
 
 #ifdef ENABLE_STATS
@@ -419,11 +396,11 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     size_t src_pos = 0;
     size_t dst_pos = 0;
     while (src_pos < src_len) {
-        if (mlens[src_pos] == 1) {
+        uint32_t factor_len = aux[1 + 2 * src_pos];
+        if (factor_len == 1) {
             literals += 1;
             src_pos += 1;
         } else {
-            uint32_t factor_len = mlens[src_pos];
             uint8_t token = (min(literals, 15) << 4) | min(factor_len - 4, 15);
             assert(dst_pos < dst_len);
             dst[dst_pos] = token;
@@ -437,7 +414,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             copy(src, copy_pos, dst, dst_pos, literals);
             dst_pos += literals;
 
-            uint32_t factor_offs = moffs[src_pos];
+            uint32_t factor_offs = aux[2 * src_pos];
             assert(factor_offs <= src_pos);
             dst_pos += write_vbyte(dst, dst_len, dst_pos, factor_offs);
 
@@ -473,9 +450,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
 clean:
     free(sa);
-    free(psv_nsv);
-    free(moffs);
-    free(mlens);
+    free(aux);
     free(costs);
 
     return ret;
