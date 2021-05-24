@@ -248,8 +248,19 @@ struct lz_factor_ctx {
     size_t prev_nsv_len;
 };
 
-//#define CMP_FASTER
-//#define CMP_LESS
+#define CMP_FASTER
+//#define CMP_AVX2
+//#define CMP_SSE2
+
+#define CMP_LESS
+
+#if defined(CMP_AVX2) && defined(CMP_SSE2)
+#   error Must choose between AVX2 or SSE2
+#elif defined(CMP_AVX2)
+#   include <immintrin.h>
+#elif defined(CMP_SSE2)
+#   include <emmintrin.h>
+#endif
 
 static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
         size_t pos1, size_t pos2)
@@ -257,16 +268,44 @@ static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
     size_t len = common_len;
 
 #ifdef CMP_FASTER
-    while (pos2 + len <= text_len - 8) {
-        uint64_t val1 = read_u64(text, pos1 + len);
-        uint64_t val2 = read_u64(text, pos2 + len);
-        uint64_t diff = val1 ^ val2;
+#   ifdef CMP_AVX2
+        while (pos2 + len <= text_len - 32) {
+            __m256i val1 = _mm256_loadu_si256((void *)&text[pos1 + len]);
+            __m256i val2 = _mm256_loadu_si256((void *)&text[pos2 + len]);
+            __m256i cmp = _mm256_cmpeq_epi8(val1, val2);
+            int cmpmask = _mm256_movemask_epi8(cmp);
+            int diff = ~cmpmask;
 
-        if (diff != 0)
-            return len + (__builtin_ctzll(diff) >> 3);
+            if (diff != 0)
+                return len + __builtin_ctz(diff);
 
-        len += 8;
-    }
+            len += 32;
+        }
+#   elif defined(CMP_SSE2)
+        while (pos2 + len <= text_len - 16) {
+            __m128i val1 = _mm_loadu_si128((void *)&text[pos1 + len]);
+            __m128i val2 = _mm_loadu_si128((void *)&text[pos2 + len]);
+            __m128i cmp = _mm_cmpeq_epi8(val1, val2);
+            int cmpmask = _mm_movemask_epi8(cmp);
+            int diff = ~cmpmask;
+
+            if (diff != 0)
+                return len + __builtin_ctz(diff);
+
+            len += 16;
+        }
+#   else
+        while (pos2 + len <= text_len - 8) {
+            uint64_t val1 = read_u64(text, pos1 + len);
+            uint64_t val2 = read_u64(text, pos2 + len);
+            uint64_t diff = val1 ^ val2;
+
+            if (diff != 0)
+                return len + (__builtin_ctzll(diff) >> 3);
+
+            len += 8;
+        }
+#   endif
 #endif
 
     while (pos2 + len < text_len && text[pos1 + len] == text[pos2 + len])
