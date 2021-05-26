@@ -191,7 +191,7 @@ static inline size_t read_vbyte(uint8_t *src, size_t src_len, size_t pos,
         return 4;
 
     assert(pos + 4 < src_len);
-    *res = ((p[4] & 0x7fu) << 21) | *res;
+    *res = ((p[4] & 0x7fu) << 28) | *res;
     return 5;
 }
 
