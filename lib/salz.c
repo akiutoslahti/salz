@@ -649,8 +649,8 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         factor_len = factor_len < 4 ? 1 : factor_len;
 
         if (factor_len >= 4) {
-            int32_t alt_cost = 2 +
-                               vnibble_size(aux[0 + 3 * src_pos]) +
+            int32_t alt_cost = 2 + 2 +
+                               vnibble_size(aux[0 + 3 * src_pos] >> 8) +
                                (factor_len > 18 ? vnibble_size(factor_len - 18) : 0) +
                                aux[2 + 3 * (src_pos + factor_len)];
 
@@ -697,7 +697,9 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
             uint32_t factor_offs = (uint32_t)aux[0 + 3 * src_pos];
             assert(factor_offs <= src_pos);
-            write_vnibble(&ctx, factor_offs);
+            write_vnibble(&ctx, factor_offs >> 8);
+            ctx.buf[ctx.pos] = factor_offs & 0xffu;
+            ctx.pos += 1;
 
             if (factor_len >= 4 + 15)
                 write_vnibble(&ctx, factor_len - 4 - 15);
@@ -720,8 +722,6 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         assert(ctx.pos + literals - 1 < ctx.len);
         copy(src, copy_pos, ctx.buf, ctx.pos, literals);
         ctx.pos += literals;
-
-        write_vnibble(&ctx, 0);
     }
 
     vnibble_encode_ctx_fini(&ctx);
@@ -767,11 +767,13 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         ctx.pos += literals;
         dst_pos += literals;
 
+        if (ctx.pos == ctx.len)
+            break;
+
         uint32_t factor_offs;
         read_vnibble(&ctx, &factor_offs);
-
-        if (factor_offs == 0)
-            break;
+        factor_offs = (factor_offs << 8) | ctx.buf[ctx.pos];
+        ctx.pos += 1;
 
         uint32_t factor_len = token & 0xf;
         if (factor_len == 0xf) {
