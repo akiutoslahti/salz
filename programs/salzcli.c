@@ -81,7 +81,7 @@ static int compress_fname(char *in_fname, char *out_fname,
     }
     clock = get_time_ns() - clock;
 
-    fprintf(stdout, "Compressed %zu bytes into %zu bytes (ratio: %.2f) in %.2f seconds\n",
+    fprintf(stdout, "Compressed %zu bytes into %zu bytes (ratio: %.3f) in %.2f seconds\n",
             in_fsize, out_fsize, 1.0 * in_fsize / out_fsize, 1.0 * clock / NS_IN_SEC);
 
 #ifdef ENABLE_STATS

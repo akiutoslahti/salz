@@ -101,8 +101,11 @@ struct vnibble_encode_ctx {
     size_t len;
     size_t pos;
     size_t nibbles_pos;
+    size_t flags_pos;
     uint64_t nibbles;
-    size_t left;
+    uint16_t flags;
+    size_t nibbles_left;
+    size_t flags_left;
 };
 
 static inline void vnibble_encode_ctx_init(struct vnibble_encode_ctx *ctx,
@@ -110,30 +113,49 @@ static inline void vnibble_encode_ctx_init(struct vnibble_encode_ctx *ctx,
 {
     ctx->buf = buf;
     ctx->len = buf_len;
-    ctx->pos = 8;
+    ctx->pos = 10;
     ctx->nibbles_pos = 0;
+    ctx->flags_pos = 8;
     ctx->nibbles = 0;
-    ctx->left = 16;
+    ctx->flags = 0;
+    ctx->nibbles_left = 16;
+    ctx->flags_left = 16;
 }
 
 static inline void vnibble_encode_ctx_fini(struct vnibble_encode_ctx *ctx)
 {
-    ctx->nibbles <<= (ctx->left * 4);
+    ctx->nibbles <<= (ctx->nibbles_left * 4);
     write_u64(ctx->buf, ctx->nibbles_pos, ctx->nibbles);
+    ctx->flags <<= (ctx->flags_left);
+    write_u16(ctx->buf, ctx->flags_pos, ctx->flags);
+}
+
+static inline void put_flag(struct vnibble_encode_ctx *ctx, uint8_t flag)
+{
+    if (ctx->flags_left == 0) {
+        write_u16(ctx->buf, ctx->flags_pos, ctx->flags);
+        ctx->flags = 0;
+        ctx->flags_left = 16;
+        ctx->flags_pos = ctx->pos;
+        ctx->pos += 2;
+    }
+
+    ctx->flags = (ctx->flags << 1) | flag;
+    ctx->flags_left -= 1;
 }
 
 static inline void put_nibble(struct vnibble_encode_ctx *ctx, uint8_t nibble)
 {
-    if (ctx->left == 0) {
+    if (ctx->nibbles_left == 0) {
         write_u64(ctx->buf, ctx->nibbles_pos, ctx->nibbles);
         ctx->nibbles = 0;
-        ctx->left = 16;
+        ctx->nibbles_left = 16;
         ctx->nibbles_pos = ctx->pos;
         ctx->pos += 8;
     }
 
-    ctx->nibbles = (ctx->nibbles << 4) | (nibble & 0xfu);
-    ctx->left -= 1;
+    ctx->nibbles = (ctx->nibbles << 4) | nibble;
+    ctx->nibbles_left -= 1;
 }
 
 struct vnibble_decode_ctx {
@@ -141,7 +163,9 @@ struct vnibble_decode_ctx {
     size_t len;
     size_t pos;
     uint64_t nibbles;
-    size_t left;
+    uint16_t flags;
+    size_t nibbles_left;
+    size_t flags_left;
 };
 
 static inline void vnibble_decode_ctx_init(struct vnibble_decode_ctx *ctx,
@@ -149,23 +173,41 @@ static inline void vnibble_decode_ctx_init(struct vnibble_decode_ctx *ctx,
 {
     ctx->buf = buf;
     ctx->len = buf_len;
-    ctx->pos = 8;
+    ctx->pos = 10;
     ctx->nibbles = read_u64(buf, 0);
-    ctx->left = 16;
+    ctx->flags = read_u16(buf, 8);
+    ctx->nibbles_left = 16;
+    ctx->flags_left = 16;
+}
+
+static inline uint8_t get_flag(struct vnibble_decode_ctx *ctx)
+{
+    if (ctx->flags_left == 0) {
+        assert(ctx->pos + 2 - 1 < ctx->len);
+        ctx->flags = read_u64(ctx->buf, ctx->pos);
+        ctx->pos += 2;
+        ctx->flags_left = 16;
+    }
+
+    uint8_t ret = (ctx->flags & 0x8000) ? 1 : 0;
+    ctx->flags <<= 1;
+    ctx->flags_left -= 1;
+
+    return ret;
 }
 
 static inline uint8_t get_nibble(struct vnibble_decode_ctx *ctx)
 {
-    if (ctx->left == 0) {
+    if (ctx->nibbles_left == 0) {
         assert(ctx->pos + 8 - 1 < ctx->len);
         ctx->nibbles = read_u64(ctx->buf, ctx->pos);
         ctx->pos += 8;
-        ctx->left = 16;
+        ctx->nibbles_left = 16;
     }
 
     uint8_t ret = (ctx->nibbles & 0xf000000000000000llu) >> 60;
     ctx->nibbles <<= 4;
-    ctx->left -= 1;
+    ctx->nibbles_left -= 1;
 
     return ret;
 }
@@ -633,25 +675,22 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
     aux[2 + 3 * src_len] = 0;
     uint32_t literals = 0;
-    uint32_t next_inc = 15;
-    uint32_t next_inc_mul = 1;
+    uint32_t next_inc = 1;
     for (size_t src_pos = src_len - 1; src_pos > 0; src_pos--) {
-        int32_t cost = 2 + aux[2 + 3 * (src_pos + 1)];
+        int32_t cost = 8 + aux[2 + 3 * (src_pos + 1)];
         literals += 1;
 
         if (literals == next_inc) {
-            cost += 1;
-            next_inc = 15 + (1 << (3 * next_inc_mul));
-            next_inc_mul += 1;
+            cost += 4;
+            next_inc <<= 3;
         }
 
         int32_t factor_len = aux[1 + 3 * src_pos];
         factor_len = factor_len < 4 ? 1 : factor_len;
 
         if (factor_len >= 4) {
-            int32_t alt_cost = 2 + 2 +
-                               vnibble_size(aux[0 + 3 * src_pos] >> 8) +
-                               (factor_len > 18 ? vnibble_size(factor_len - 18) : 0) +
+            int32_t alt_cost = 2 + 8 + (4 * vnibble_size(aux[0 + 3 * src_pos] >> 8)) +
+                               (4 * vnibble_size(factor_len - 4)) +
                                aux[2 + 3 * (src_pos + factor_len)];
 
             if (cost <= alt_cost) {
@@ -659,8 +698,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             } else {
                 cost = alt_cost;
                 literals = 0;
-                next_inc = 15;
-                next_inc_mul = 1;
+                next_inc = 1;
             }
         }
         aux[1 + 3 * src_pos] = factor_len;
@@ -682,18 +720,22 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             literals += 1;
             src_pos += 1;
         } else {
-            uint8_t token = (min(literals, 15) << 4) | min(factor_len - 4, 15);
-            assert(ctx.pos < ctx.len);
-            ctx.buf[ctx.pos] = token;
-            ctx.pos += 1;
+            if (literals != 0) {
+                put_flag(&ctx, 0);
 
-            if (literals >= 15)
-                write_vnibble(&ctx, literals - 15);
+                write_vnibble(&ctx, literals);
 
-            size_t copy_pos = src_pos - literals;
-            assert(ctx.pos + literals - 1 < ctx.len);
-            copy(src, copy_pos, ctx.buf, ctx.pos, literals);
-            ctx.pos += literals;
+                size_t copy_pos = src_pos - literals;
+                assert(ctx.pos + literals - 1 < ctx.len);
+                copy(src, copy_pos, ctx.buf, ctx.pos, literals);
+                ctx.pos += literals;
+
+                debug("literals: %d", literals);
+
+                literals = 0;
+            }
+
+            put_flag(&ctx, 1);
 
             uint32_t factor_offs = (uint32_t)aux[0 + 3 * src_pos];
             assert(factor_offs <= src_pos);
@@ -701,27 +743,26 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             ctx.buf[ctx.pos] = factor_offs & 0xffu;
             ctx.pos += 1;
 
-            if (factor_len >= 4 + 15)
-                write_vnibble(&ctx, factor_len - 4 - 15);
-
-            literals = 0;
+            write_vnibble(&ctx, factor_len - 4);
             src_pos += factor_len;
+
+            debug("offset: %d, length: %d", factor_offs, factor_len);
         }
     }
 
     if (literals != 0) {
-        uint8_t token = min(literals, 0xf) << 4;
-        assert(ctx.pos < ctx.len);
-        ctx.buf[ctx.pos] = token;
-        ctx.pos += 1;
+        put_flag(&ctx, 0);
 
-        if (literals >= 15)
-            write_vnibble(&ctx, literals - 15);
+        write_vnibble(&ctx, literals);
 
         size_t copy_pos = src_pos - literals;
         assert(ctx.pos + literals - 1 < ctx.len);
         copy(src, copy_pos, ctx.buf, ctx.pos, literals);
         ctx.pos += literals;
+
+        debug("literals: %d", literals);
+
+        literals = 0;
     }
 
     vnibble_encode_ctx_fini(&ctx);
@@ -751,42 +792,38 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     size_t dst_pos = 0;
 
     while (ctx.pos < ctx.len) {
-        uint8_t token = ctx.buf[ctx.pos];
-        ctx.pos += 1;
+        uint8_t flag = get_flag(&ctx);
 
-        uint32_t literals = token >> 4;
-        if (literals == 0xf) {
-            uint32_t extra;
-            read_vnibble(&ctx, &extra);
-            literals += extra;
+        if (flag) {
+            uint32_t factor_offs;
+
+            read_vnibble(&ctx, &factor_offs);
+            factor_offs = (factor_offs << 8) | ctx.buf[ctx.pos];
+            ctx.pos += 1;
+
+            uint32_t factor_len;
+            read_vnibble(&ctx, &factor_len);
+            factor_len += 4;
+
+            debug("offset: %d, length: %d", factor_offs, factor_len);
+
+            assert(dst_pos + factor_len - 1 < dst_len);
+            assert(factor_offs <= dst_pos);
+            copy_oaat(dst, dst_pos - factor_offs, dst, dst_pos, factor_len);
+            dst_pos += factor_len;
+        } else {
+            uint32_t literals;
+            read_vnibble(&ctx, &literals);
+
+            debug("literals: %d", literals);
+
+            assert(ctx.pos + literals - 1 < ctx.len);
+            assert(dst_pos + literals - 1 < dst_len);
+            copy(ctx.buf, ctx.pos, dst, dst_pos, literals);
+            ctx.pos += literals;
+            dst_pos += literals;
         }
 
-        assert(ctx.pos + literals - 1 < ctx.len);
-        assert(dst_pos + literals - 1 < dst_len);
-        copy(ctx.buf, ctx.pos, dst, dst_pos, literals);
-        ctx.pos += literals;
-        dst_pos += literals;
-
-        if (ctx.pos == ctx.len)
-            break;
-
-        uint32_t factor_offs;
-        read_vnibble(&ctx, &factor_offs);
-        factor_offs = (factor_offs << 8) | ctx.buf[ctx.pos];
-        ctx.pos += 1;
-
-        uint32_t factor_len = token & 0xf;
-        if (factor_len == 0xf) {
-            uint32_t extra;
-            read_vnibble(&ctx, &extra);
-            factor_len += extra;
-        }
-        factor_len += 4;
-
-        assert(dst_pos + factor_len - 1 < dst_len);
-        assert(factor_offs <= dst_pos);
-        copy_oaat(dst, dst_pos - factor_offs, dst, dst_pos, factor_len);
-        dst_pos += factor_len;
     }
 
     return (uint32_t)dst_pos;
