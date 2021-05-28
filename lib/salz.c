@@ -674,22 +674,14 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 #endif
 
     aux[2 + 3 * src_len] = 0;
-    uint32_t literals = 0;
-    uint32_t next_inc = 1;
     for (size_t src_pos = src_len - 1; src_pos > 0; src_pos--) {
-        int32_t cost = 8 + aux[2 + 3 * (src_pos + 1)];
-        literals += 1;
-
-        if (literals == next_inc) {
-            cost += 4;
-            next_inc <<= 3;
-        }
+        int32_t cost = 9 + aux[2 + 3 * (src_pos + 1)];
 
         int32_t factor_len = aux[1 + 3 * src_pos];
         factor_len = factor_len < 4 ? 1 : factor_len;
 
         if (factor_len >= 4) {
-            int32_t alt_cost = 2 + 8 + (4 * vnibble_size(aux[0 + 3 * src_pos] >> 8)) +
+            int32_t alt_cost = 1 + 8 + (4 * vnibble_size(aux[0 + 3 * src_pos] >> 8)) +
                                (4 * vnibble_size(factor_len - 4)) +
                                aux[2 + 3 * (src_pos + factor_len)];
 
@@ -697,10 +689,9 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
                 factor_len = 1;
             } else {
                 cost = alt_cost;
-                literals = 0;
-                next_inc = 1;
             }
         }
+
         aux[1 + 3 * src_pos] = factor_len;
         aux[2 + 3 * src_pos] = cost;
     }
@@ -712,29 +703,16 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     struct vnibble_encode_ctx ctx;
     vnibble_encode_ctx_init(&ctx, dst, dst_len);
 
-    literals = 0;
     size_t src_pos = 0;
     while (src_pos < src_len) {
         uint32_t factor_len = (uint32_t)aux[1 + 3 * src_pos];
         if (factor_len == 1) {
-            literals += 1;
+            put_flag(&ctx, 0);
+
+            copy(src, src_pos, ctx.buf, ctx.pos, 1);
             src_pos += 1;
+            ctx.pos += 1;
         } else {
-            if (literals != 0) {
-                put_flag(&ctx, 0);
-
-                write_vnibble(&ctx, literals);
-
-                size_t copy_pos = src_pos - literals;
-                assert(ctx.pos + literals - 1 < ctx.len);
-                copy(src, copy_pos, ctx.buf, ctx.pos, literals);
-                ctx.pos += literals;
-
-                debug("literals: %d", literals);
-
-                literals = 0;
-            }
-
             put_flag(&ctx, 1);
 
             uint32_t factor_offs = (uint32_t)aux[0 + 3 * src_pos];
@@ -745,24 +723,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
             write_vnibble(&ctx, factor_len - 4);
             src_pos += factor_len;
-
-            debug("offset: %d, length: %d", factor_offs, factor_len);
         }
-    }
-
-    if (literals != 0) {
-        put_flag(&ctx, 0);
-
-        write_vnibble(&ctx, literals);
-
-        size_t copy_pos = src_pos - literals;
-        assert(ctx.pos + literals - 1 < ctx.len);
-        copy(src, copy_pos, ctx.buf, ctx.pos, literals);
-        ctx.pos += literals;
-
-        debug("literals: %d", literals);
-
-        literals = 0;
     }
 
     vnibble_encode_ctx_fini(&ctx);
@@ -805,23 +766,17 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             read_vnibble(&ctx, &factor_len);
             factor_len += 4;
 
-            debug("offset: %d, length: %d", factor_offs, factor_len);
-
             assert(dst_pos + factor_len - 1 < dst_len);
             assert(factor_offs <= dst_pos);
             copy_oaat(dst, dst_pos - factor_offs, dst, dst_pos, factor_len);
             dst_pos += factor_len;
         } else {
-            uint32_t literals;
-            read_vnibble(&ctx, &literals);
 
-            debug("literals: %d", literals);
-
-            assert(ctx.pos + literals - 1 < ctx.len);
-            assert(dst_pos + literals - 1 < dst_len);
-            copy(ctx.buf, ctx.pos, dst, dst_pos, literals);
-            ctx.pos += literals;
-            dst_pos += literals;
+            assert(ctx.pos < ctx.len);
+            assert(dst_pos < dst_len);
+            copy(ctx.buf, ctx.pos, dst, dst_pos, 1);
+            ctx.pos += 1;
+            dst_pos += 1;
         }
 
     }
