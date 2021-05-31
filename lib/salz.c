@@ -212,6 +212,37 @@ static inline void write_nibble(struct vnibble_encode_ctx *ctx, uint8_t nibble)
     ctx->nibbles_left -= 1;
 }
 
+static inline size_t gamma_bitsize(uint32_t val)
+{
+    assert(val != 0);
+
+    return 1 + 2 * (31 - __builtin_clz(val));
+}
+
+static inline void read_gamma(struct vnibble_decode_ctx *ctx, uint32_t *res)
+{
+    *res = 1;
+
+    while (read_bit(ctx) == 0)
+        *res = (*res << 1) | read_bit(ctx);
+}
+
+static inline void write_gamma(struct vnibble_encode_ctx *ctx, uint32_t val)
+{
+    assert(val != 0);
+
+    if (val > 1) {
+        uint32_t mask = 1 << (30 - __builtin_clz(val));
+        while (mask > 0) {
+            write_bit(ctx, 0);
+            write_bit(ctx, val & mask ? 1 : 0);
+            mask >>= 1;
+        }
+    }
+
+    write_bit(ctx, 1);
+}
+
 static inline size_t vnibble_size(uint32_t val)
 {
 
@@ -693,14 +724,18 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         if (factor_len < 4) {
             factor_len = 1;
         } else {
-            int32_t alt_cost = 1 + 8 + vnibble_bitsize(factor_offs >> 8) +
-                               vnibble_bitsize(factor_len - 4) +
+            int32_t alt_cost = //1 + 8 + vnibble_bitsize(factor_offs >> 8) +
+                               1 + 8 + gamma_bitsize((factor_offs >> 8) + 1) +
+                               //vnibble_bitsize(factor_len - 4) +
+                               gamma_bitsize(factor_len - 3) +
                                aux[2 + 3 * (src_pos + factor_len)];
 
 #if 0
             for (int32_t i = 4; i < factor_len; i++) {
-                int32_t alt_cost = 1 + 8 + vnibble_bitsize(factor_offs >> 8) +
-                                   vnibble_bitsize(i - 4) +
+                int32_t alt_cost = //1 + 8 + vnibble_bitsize(factor_offs >> 8) +
+                                   1 + 8 + gamma_bitsize((factor_offs >> 8) + 1) +
+                                   //vnibble_bitsize(i - 4) +
+                                   gamma_bitsize(i - 3) +
                                    aux[2 + 3 * (src_pos + i)];
 
                 if (alt_cost2 < alt_cost) {
@@ -741,11 +776,13 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
             uint32_t factor_offs = (uint32_t)aux[0 + 3 * src_pos];
             assert(factor_offs <= src_pos);
-            write_vnibble(&ctx, factor_offs >> 8);
+            //write_vnibble(&ctx, factor_offs >> 8);
+            write_gamma(&ctx, (factor_offs >> 8) + 1);
             ctx.buf[ctx.pos] = factor_offs & 0xffu;
             ctx.pos += 1;
 
-            write_vnibble(&ctx, factor_len - 4);
+            //write_vnibble(&ctx, factor_len - 4);
+            write_gamma(&ctx, factor_len - 3);
             src_pos += factor_len;
         }
     }
@@ -782,13 +819,17 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         if (flag) {
             uint32_t factor_offs;
 
-            read_vnibble(&ctx, &factor_offs);
-            factor_offs = (factor_offs << 8) | ctx.buf[ctx.pos];
+            //read_vnibble(&ctx, &factor_offs);
+            read_gamma(&ctx, &factor_offs);
+            //factor_offs = (factor_offs << 8) | ctx.buf[ctx.pos];
+            factor_offs = ((factor_offs - 1) << 8) | ctx.buf[ctx.pos];
             ctx.pos += 1;
 
             uint32_t factor_len;
-            read_vnibble(&ctx, &factor_len);
-            factor_len += 4;
+            //read_vnibble(&ctx, &factor_len);
+            read_gamma(&ctx, &factor_len);
+            //factor_len += 4;
+            factor_len += 3;
 
             assert(dst_pos + factor_len - 1 < dst_len);
             assert(factor_offs <= dst_pos);
@@ -802,7 +843,6 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             ctx.pos += 1;
             dst_pos += 1;
         }
-
     }
 
     return (uint32_t)dst_pos;
