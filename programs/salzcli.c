@@ -20,6 +20,50 @@
 
 #define DEFAULT_LOG2_BLOCK_SIZE 16
 
+static inline size_t fwrite_vbyte(FILE *stream, uint32_t val)
+{
+    size_t vbyte_len = 0;
+
+    while (val > 0x7f) {
+        if (fputc(val & 0x7f, stream) == EOF)
+            return 0;
+
+        val >>= 7;
+        vbyte_len += 1;
+    }
+
+    if (fputc(val | 0x80, stream) == EOF)
+        return 0;
+
+    vbyte_len += 1;
+
+    return vbyte_len;
+}
+
+static inline size_t fread_vbyte(FILE *stream, uint32_t *res)
+{
+    int32_t vbyte_len = 0;
+    int c;
+
+    *res = 0;
+
+    while (true) {
+        if ((c = fgetc(stream)) == EOF)
+            return 0;
+
+        if (c > 0x7f)
+            break;
+
+        *res = (c << (7 * vbyte_len)) | *res;
+        vbyte_len += 1;
+    }
+
+    *res = ((c & 0x7f) << (7 * vbyte_len)) | *res;
+    vbyte_len += 1;
+
+    return vbyte_len;
+}
+
 static int compress_fname(char *in_fname, char *out_fname,
         uint32_t log2_block_size)
 {
@@ -33,6 +77,7 @@ static int compress_fname(char *in_fname, char *out_fname,
     size_t read_len;
     size_t in_fsize = 0;
     size_t out_fsize = 0;
+    size_t write_len;
     int ret = 0;
     uint64_t clock;
 
@@ -58,10 +103,14 @@ static int compress_fname(char *in_fname, char *out_fname,
         goto fail;
 
     clock = get_time_ns();
-    if (fwrite(&block_size, sizeof(block_size), 1, out_stream) == 0) {
+
+    write_len = fwrite_vbyte(out_stream, block_size);
+    if (write_len == 0) {
         /* @TODO add error ? */
+        goto fail;
     }
-    out_fsize += sizeof(block_size);
+    out_fsize += write_len;
+
     while ((read_len = fread(src_buf, 1, src_len, in_stream)) != 0) {
         in_fsize += read_len;
         uint32_t encoded_len = salz_encode_default(src_buf, read_len, dst_buf,
@@ -72,8 +121,14 @@ static int compress_fname(char *in_fname, char *out_fname,
             goto fail;
         }
 
-        if (fwrite(&encoded_len, sizeof(encoded_len), 1, out_stream) == 0 ||
-            fwrite(dst_buf, 1, encoded_len, out_stream) != encoded_len) {
+        write_len = fwrite_vbyte(out_stream, encoded_len);
+        if (write_len == 0) {
+            /* @TODO add error ? */
+            goto fail;
+        }
+        out_fsize += write_len;
+
+        if (fwrite(dst_buf, 1, encoded_len, out_stream) != encoded_len) {
             /* @TODO add error ? */
             goto fail;
         }
@@ -122,6 +177,7 @@ static int decompress_fname(char *in_fname, char *out_fname)
     size_t out_fsize = 0;
     uint64_t clock;
     int ret = 0;
+    size_t read_len;
 
     if ((in_stream = fopen(in_fname, "r")) == NULL) {
         perror("Input file could not be opened");
@@ -133,8 +189,10 @@ static int decompress_fname(char *in_fname, char *out_fname)
         goto fail;
     }
 
-    if (fread(&block_size, sizeof(block_size), 1, in_stream) != sizeof(block_size)) {
+    read_len = fread_vbyte(in_stream, &block_size);
+    if (read_len == 0) {
         /* @TODO Add error ? */
+        goto fail;
     }
 
     /* @TODO formulate maximum compressed size better */
@@ -148,7 +206,7 @@ static int decompress_fname(char *in_fname, char *out_fname)
         goto fail;
 
     clock = get_time_ns();
-    while (fread(&read_size, sizeof(read_size), 1, in_stream) != 0) {
+    while (fread_vbyte(in_stream, &read_size) != 0) {
         if (read_size < src_len &&
             fread(src_buf, 1, read_size, in_stream) != read_size) {
             /* @TODO Add error ? */

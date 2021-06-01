@@ -781,7 +781,6 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             ctx.buf[ctx.pos] = factor_offs & 0xffu;
             ctx.pos += 1;
 
-            //write_vnibble(&ctx, factor_len - 4);
             write_gr(&ctx, factor_len - 4, 3);
             src_pos += factor_len;
         }
@@ -824,7 +823,6 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             ctx.pos += 1;
 
             uint32_t factor_len;
-            //read_vnibble(&ctx, &factor_len);
             read_gr(&ctx, &factor_len, 3);
             factor_len += 4;
 
