@@ -212,6 +212,39 @@ static inline void write_nibble(struct vnibble_encode_ctx *ctx, uint8_t nibble)
     ctx->nibbles_left -= 1;
 }
 
+static inline size_t gr_bitsize(uint32_t val, size_t k)
+{
+    return (val >> k) + 1 + k;
+}
+
+static inline void write_gr(struct vnibble_encode_ctx *ctx, uint32_t val, size_t k)
+{
+    uint32_t q = val >> k;
+
+    while (q != 0) {
+        write_bit(ctx, 0);
+        q -= 1;
+    }
+    write_bit(ctx, 1);
+
+    for (int32_t i = k - 1; i >= 0; i--)
+        write_bit(ctx, val & (1 << i) ? 1 : 0);
+}
+
+static inline void read_gr(struct vnibble_decode_ctx *ctx, uint32_t *res, size_t k)
+{
+
+    uint32_t q = 0;
+
+    while (read_bit(ctx) == 0)
+        q += 1;
+
+    *res = q;
+
+    for (int32_t i = k - 1; i >= 0; i--)
+        *res = (*res << 1) | read_bit(ctx);
+}
+
 static inline size_t vnibble_size(uint32_t val)
 {
 
@@ -694,7 +727,8 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             factor_len = 1;
         } else {
             int32_t alt_cost = 1 + 8 + vnibble_bitsize(factor_offs >> 8) +
-                               vnibble_bitsize(factor_len - 4) +
+                               //vnibble_bitsize(factor_len - 4) +
+                               gr_bitsize(factor_len - 4, 3) +
                                aux[2 + 3 * (src_pos + factor_len)];
 
 #if 0
@@ -745,7 +779,8 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             ctx.buf[ctx.pos] = factor_offs & 0xffu;
             ctx.pos += 1;
 
-            write_vnibble(&ctx, factor_len - 4);
+            //write_vnibble(&ctx, factor_len - 4);
+            write_gr(&ctx, factor_len - 4, 3);
             src_pos += factor_len;
         }
     }
@@ -787,7 +822,8 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             ctx.pos += 1;
 
             uint32_t factor_len;
-            read_vnibble(&ctx, &factor_len);
+            //read_vnibble(&ctx, &factor_len);
+            read_gr(&ctx, &factor_len, 3);
             factor_len += 4;
 
             assert(dst_pos + factor_len - 1 < dst_len);
