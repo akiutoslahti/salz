@@ -619,36 +619,31 @@ static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
 
 struct lz_factor_ctx {
     int32_t psv;
-    int32_t prev_psv;
-    size_t prev_psv_len;
+    size_t psv_len;
     int32_t nsv;
-    int32_t prev_nsv;
-    size_t prev_nsv_len;
+    size_t nsv_len;
 };
 
 static inline void lz_factor(struct lz_factor_ctx *ctx, uint8_t *text,
-        size_t text_len, size_t pos, int32_t *out_offs, int32_t *out_len)
+        size_t text_len, size_t pos, int32_t psv, int32_t nsv)
 {
     size_t psv_len = 0;
     size_t nsv_len = 0;
 
-    if (ctx->psv != -1) {
-        size_t common_len = ctx->prev_psv_len != 0 ? ctx->prev_psv_len - 1 : 0;
-        psv_len = lcp_cmp(text, text_len, common_len, ctx->psv, pos);
+    if (psv != -1) {
+        size_t common_len = ctx->psv_len != 0 ? ctx->psv_len - 1 : 0;
+        psv_len = lcp_cmp(text, text_len, common_len, psv, pos);
     }
 
-    if (ctx->nsv != -1) {
-        size_t common_len = ctx->prev_nsv_len != 0 ? ctx->prev_nsv_len - 1 : 0;
-        nsv_len = lcp_cmp(text, text_len, common_len, ctx->nsv, pos);
+    if (nsv != -1) {
+        size_t common_len = ctx->nsv_len != 0 ? ctx->nsv_len - 1 : 0;
+        nsv_len = lcp_cmp(text, text_len, common_len, nsv, pos);
     }
 
-    *out_offs = (int32_t)(pos - (psv_len > nsv_len ? ctx->psv : ctx->nsv));
-    *out_len = (int32_t)max(psv_len, nsv_len);
-
-    ctx->prev_psv = ctx->psv;
-    ctx->prev_psv_len = psv_len;
-    ctx->prev_nsv = ctx->nsv;
-    ctx->prev_nsv_len = nsv_len;
+    ctx->psv = psv;
+    ctx->psv_len = psv_len;
+    ctx->nsv = nsv;
+    ctx->nsv_len = nsv_len;
 }
 
 uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
@@ -661,7 +656,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     int32_t *sa;
     int32_t *aux;
     size_t sa_len = src_len + 2;
-    size_t aux_len = 3 * (src_len + 1);
+    size_t aux_len = 4 * src_len;
     uint32_t ret = 0;
 
     sa = malloc(sa_len * sizeof(*sa));
@@ -689,8 +684,8 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     sa[src_len + 1] = -1;
     for (size_t top = 0, i = 1; i < sa_len; i++) {
         while (sa[top] > sa[i]) {
-            aux[0 + 3 * sa[top]] = sa[top - 1];
-            aux[1 + 3 * sa[top]] = sa[i];
+            aux[0 + 4 * sa[top]] = sa[top - 1];
+            aux[1 + 4 * sa[top]] = sa[i];
             top -= 1;
         }
         top += 1;
@@ -701,57 +696,64 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     increment_clock(st.psv_nsv_time);
 #endif
 
-    struct lz_factor_ctx lz_ctx = { -1, -1, 0, -1, -1, 0 };
+    struct lz_factor_ctx lz_ctx = { -1, 0, -1, 0 };
 
     aux[1] = 1;
     for (size_t src_pos = 1; src_pos < src_len; src_pos++) {
-        lz_ctx.psv = aux[0 + 3 * src_pos];
-        lz_ctx.nsv = aux[1 + 3 * src_pos];
+        int32_t psv = aux[0 + 4 * src_pos];
+        int32_t nsv = aux[1 + 4 * src_pos];
 
-        lz_factor(&lz_ctx, src, src_len, src_pos, &aux[0 + 3 * src_pos],
-                  &aux[1 + 3 * src_pos]);
+        lz_factor(&lz_ctx, src, src_len, src_pos, psv, nsv);
+
+        aux[0 + 4 * src_pos] = (int32_t)(src_pos - lz_ctx.psv);
+        aux[1 + 4 * src_pos] = (int32_t)lz_ctx.psv_len;
+        aux[2 + 4 * src_pos] = (int32_t)(src_pos - lz_ctx.nsv);
+        aux[3 + 4 * src_pos] = (int32_t)lz_ctx.nsv_len;
     }
 
 #ifdef ENABLE_STATS
     increment_clock(st.factor_time);
 #endif
 
-    aux[2 + 3 * src_len] = 0;
+    int32_t *mc = sa;
+    mc[src_len] = 0;
     for (size_t src_pos = src_len - 1; src_pos > 0; src_pos--) {
-        int32_t cost = 9 + aux[2 + 3 * (src_pos + 1)];
+        int32_t lcost = 9 + mc[src_pos + 1];
 
-        int32_t factor_offs = aux[0 + 3 * src_pos];
-        int32_t factor_len = aux[1 + 3 * src_pos];
+        int32_t offs1 = aux[0 + 4 * src_pos];
+        int32_t len1 = aux[1 + 4 * src_pos];
+        int32_t cost1;
 
-        if (factor_len < 4) {
-            factor_len = 1;
+        if (len1 < 4)
+            cost1 = lcost + 1;
+        else
+            cost1 = 1 + 8 + vnibble_bitsize(offs1 >> 8) +
+                    gr_bitsize(len1 - 4, 3) +
+                    mc[src_pos + len1];
+
+        int32_t offs2 = aux[2 + 4 * src_pos];
+        int32_t len2 = aux[3 + 4 * src_pos];
+        int32_t cost2;
+
+        if (len2 < 4)
+            cost2 = lcost + 1;
+        else
+            cost2 = 1 + 8 + vnibble_bitsize(offs2 >> 8) +
+                    gr_bitsize(len2 - 4, 3) +
+                    mc[src_pos + len2];
+
+        if (lcost <= cost1 && lcost <= cost2) {
+            aux[1 + 4 * src_pos] = 1;
+            mc[src_pos] = lcost;
+        } else if (cost1 < lcost && cost1 < cost2) {
+            aux[0 + 4 * src_pos] = offs1;
+            aux[1 + 4 * src_pos] = len1;
+            mc[src_pos] = cost1;
         } else {
-            int32_t alt_cost = 1 + 8 + vnibble_bitsize(factor_offs >> 8) +
-                               //vnibble_bitsize(factor_len - 4) +
-                               gr_bitsize(factor_len - 4, 3) +
-                               aux[2 + 3 * (src_pos + factor_len)];
-
-#if 0
-            for (int32_t i = 4; i < factor_len; i++) {
-                int32_t alt_cost = 1 + 8 + vnibble_bitsize(factor_offs >> 8) +
-                                   vnibble_bitsize(i - 4) +
-                                   aux[2 + 3 * (src_pos + i)];
-
-                if (alt_cost2 < alt_cost) {
-                    alt_cost = alt_cost2;
-                    factor_len = i;
-                }
-            }
-#endif
-
-            if (alt_cost < cost)
-                cost = alt_cost;
-            else
-                factor_len = 1;
+            aux[0 + 4 * src_pos] = offs2;
+            aux[1 + 4 * src_pos] = len2;
+            mc[src_pos] = cost2;
         }
-
-        aux[1 + 3 * src_pos] = factor_len;
-        aux[2 + 3 * src_pos] = cost;
     }
 
 #ifdef ENABLE_STATS
@@ -763,7 +765,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
     size_t src_pos = 0;
     while (src_pos < src_len) {
-        uint32_t factor_len = (uint32_t)aux[1 + 3 * src_pos];
+        uint32_t factor_len = (uint32_t)aux[1 + 4 * src_pos];
         if (factor_len == 1) {
             write_bit(&ctx, 0);
 
@@ -773,7 +775,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         } else {
             write_bit(&ctx, 1);
 
-            uint32_t factor_offs = (uint32_t)aux[0 + 3 * src_pos];
+            uint32_t factor_offs = (uint32_t)aux[0 + 4 * src_pos];
             assert(factor_offs <= src_pos);
             write_vnibble(&ctx, factor_offs >> 8);
             ctx.buf[ctx.pos] = factor_offs & 0xffu;
