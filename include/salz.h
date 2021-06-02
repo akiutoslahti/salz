@@ -16,12 +16,22 @@
 #ifdef ENABLE_STATS
 #include "common.h"
 
+#define OFFS_CACHE_SIZE 8
+
 struct stats {
     uint64_t sa_time;
     uint64_t psv_nsv_time;
     uint64_t factor_time;
     uint64_t mincost_time;
     uint64_t encode_time;
+
+    size_t literals;
+    size_t factors;
+
+    uint32_t offsets[OFFS_CACHE_SIZE];
+    size_t offset_hits[OFFS_CACHE_SIZE];
+    size_t offset_hit;
+    size_t offset_miss;
 };
 
 extern struct stats *get_stats(void);

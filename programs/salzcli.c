@@ -142,11 +142,29 @@ static int compress_fname(char *in_fname, char *out_fname,
 #ifdef ENABLE_STATS
     struct stats *st = get_stats();
 
-    fprintf(stderr, "SACA time: %f, PSV/NSV time: %f, LZ factor time: %f, "
+    fprintf(stderr, "    SACA time: %f, PSV/NSV time: %f, LZ factor time: %f, "
             "DP mincost time: %f, encode time: %f\n",
             1.0 * st->sa_time / NS_IN_SEC, 1.0 * st->psv_nsv_time / NS_IN_SEC,
             1.0 * st->factor_time / NS_IN_SEC, 1.0 * st->mincost_time / NS_IN_SEC,
             1.0 * st->encode_time / NS_IN_SEC);
+
+    fprintf(stderr, "    Literals: %zu, factors: %zu\n",
+            st->literals,
+            st->factors);
+
+    size_t nr_offsets = sizeof(st->offsets) / sizeof(st->offsets[0]);
+
+    fprintf(stderr, "    Offset cache size: %zu, cache miss: %zu, cache hit: %zu, "
+            "cache hit rate: %.3f\n",
+            nr_offsets,
+            st->offset_miss,
+            st->offset_hit,
+            1.0 * st->offset_hit / (st->offset_miss + st->offset_hit));
+
+    fprintf(stderr, "    Offset cache hits by index: [ ");
+    for (size_t i = 0; i < nr_offsets - 1; i++)
+        fprintf(stderr, "%.3f, ", 1.0 * st->offset_hits[i] / st->offset_hit);
+    fprintf(stderr, "%.3f ]\n", 1.0 * st->offset_hits[nr_offsets - 1] / st->offset_hit);
 #endif
 
 exit:

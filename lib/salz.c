@@ -37,6 +37,8 @@
 
 #define unused(var) ((void)var)
 
+#define array_len(arr) (sizeof(arr) / sizeof(arr[0]))
+
 #ifdef ENABLE_STATS
     struct stats st;
 
@@ -743,6 +745,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
                     mc[src_pos + len2];
 
         if (lcost <= cost1 && lcost <= cost2) {
+            aux[0 + 4 * src_pos] = 0;
             aux[1 + 4 * src_pos] = 1;
             mc[src_pos] = lcost;
         } else if (cost1 < lcost && cost1 < cost2) {
@@ -772,6 +775,9 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             copy(src, src_pos, ctx.buf, ctx.pos, 1);
             src_pos += 1;
             ctx.pos += 1;
+#ifdef ENABLE_STATS
+            st.literals += 1;
+#endif
         } else {
             write_bit(&ctx, 1);
 
@@ -784,6 +790,28 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             //write_vnibble(&ctx, factor_len - 4);
             write_gr(&ctx, factor_len - 4, 3);
             src_pos += factor_len;
+#ifdef ENABLE_STATS
+            st.factors += 1;
+
+            size_t nr_offsets = array_len(st.offsets);
+
+            size_t i;
+            for (i = 0; i < nr_offsets; i++)
+                if (st.offsets[i] == factor_offs)
+                    break;
+
+            if (i < nr_offsets) {
+                st.offset_hit += 1;
+                st.offset_hits[i] += 1;
+            } else {
+                st.offset_miss += 1;
+            }
+
+            for (i = min(i, nr_offsets - 1); i > 0; i--)
+                st.offsets[i] = st.offsets[i - 1];
+
+            st.offsets[0] = factor_offs;
+#endif
         }
     }
 
