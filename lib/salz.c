@@ -697,9 +697,12 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
     struct lz_factor_ctx lz_ctx = { -1, 0, -1, 0 };
 
-    int32_t *poffs = sa;
-    for (size_t i = 0; i < src_len; i++)
-        poffs[i] = 0;
+#define nr_offs 8
+    int32_t *offs;
+    size_t offs_len = nr_offs * (src_len + 1);
+    offs = malloc(offs_len * sizeof(*offs));
+
+    memset(offs, 0, offs_len * sizeof(*offs));
 
     for (size_t i = 0; i < src_len + 1; i++)
         aux[2 + 4 * i] = INT_MAX;
@@ -715,46 +718,69 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         lz_factor(&lz_ctx, src, src_len, src_pos, psv, nsv);
 
         int32_t base_cost = aux[2 + 4 * src_pos];
-        int32_t prev_offs = poffs[src_pos];
 
         int32_t literal_cost = 9 + base_cost;
         if (literal_cost < aux[2 + 4 * (src_pos + 1)]) {
             aux[2 + 4 * (src_pos + 1)] = literal_cost;
             aux[3 + 4 * (src_pos + 1)] = src_pos;
-            poffs[src_pos + 1] = prev_offs;
+
+            for (size_t i = 0; i < nr_offs; i++)
+                offs[i + nr_offs * (src_pos + 1)] = offs[i + nr_offs * src_pos];
         }
 
-        int32_t psv_offs = (int32_t)(src_pos - lz_ctx.psv);
         int32_t psv_len = (int32_t)lz_ctx.psv_len;
         if (psv_len >= 4) {
+            int32_t psv_offs = (int32_t)(src_pos - lz_ctx.psv);
             int32_t psv_cost = base_cost + gr_bitsize(psv_len - 4, 3);
 
-            if (psv_offs != prev_offs)
+            size_t i;
+            for (i = 0; i < nr_offs; i++)
+                if (psv_offs == offs[i + nr_offs * src_pos])
+                    break;
+
+            if (i == nr_offs)
                 psv_cost += 2 + 8 + vnibble_bitsize(psv_offs >> 8);
             else
-                psv_cost += 3;
+                psv_cost += 3 + i;
 
             if (psv_cost < aux[2 + 4 * (src_pos + psv_len)]) {
                 aux[2 + 4 * (src_pos + psv_len)] = psv_cost;
                 aux[3 + 4 * (src_pos + psv_len)] = src_pos;
-                poffs[src_pos + psv_len] = psv_offs;
+
+                for (size_t j = 0; j < nr_offs; j++)
+                    offs[j + nr_offs * (src_pos + psv_len)] = offs[j + nr_offs * src_pos];
+
+                for (i = min(i, nr_offs - 1); i > 0; i--)
+                    offs[i + nr_offs * (src_pos + psv_len)] = offs[-1 + i + nr_offs * (src_pos + psv_len)];
+                offs[0 + nr_offs * (src_pos + psv_len)] = psv_offs;
             }
         }
 
-        int32_t nsv_offs = (int32_t)(src_pos - lz_ctx.nsv);
         int32_t nsv_len = (int32_t)lz_ctx.nsv_len;
         if (nsv_len >= 4) {
+            int32_t nsv_offs = (int32_t)(src_pos - lz_ctx.nsv);
             int32_t nsv_cost = base_cost + gr_bitsize(nsv_len - 4, 3);
 
-            if (nsv_offs != prev_offs)
+            size_t i;
+            for (i = 0; i < nr_offs; i++)
+                if (nsv_offs == offs[i + nr_offs * src_pos])
+                    break;
+
+            if (i == nr_offs)
                 nsv_cost += 2 + 8 + vnibble_bitsize(nsv_offs >> 8);
             else
-                nsv_cost += 3;
+                nsv_cost += 3 + i;
 
             if (nsv_cost < aux[2 + 4 * (src_pos + nsv_len)]) {
                 aux[2 + 4 * (src_pos + nsv_len)] = nsv_cost;
                 aux[3 + 4 * (src_pos + nsv_len)] = src_pos;
-                poffs[src_pos + nsv_len] = nsv_offs;
+
+                for (size_t j = 0; j < nr_offs; j++)
+                    offs[j + nr_offs * (src_pos + nsv_len)] = offs[j + nr_offs * src_pos];
+
+                for (i = min(i, nr_offs - 1); i > 0; i--)
+                    offs[i + nr_offs * (src_pos + nsv_len)] = offs[-1 + i + nr_offs * (src_pos + nsv_len)];
+                offs[0 + nr_offs * (src_pos + nsv_len)] = nsv_offs;
             }
         }
     }
@@ -771,12 +797,14 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             aux[0 + 4 * prev_pos] = 0;
             aux[1 + 4 * prev_pos] = 1;
         } else {
-            aux[0 + 4 * prev_pos] = poffs[src_pos];
+            aux[0 + 4 * prev_pos] = offs[0 + nr_offs * src_pos];
             aux[1 + 4 * prev_pos] = factor_len;
         }
 
         src_pos = prev_pos;
     }
+
+    free(offs);
 
 #ifdef ENABLE_STATS
     increment_clock(st.mincost_time);
@@ -785,13 +813,13 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     struct vnibble_encode_ctx ctx;
     vnibble_encode_ctx_init(&ctx, dst, dst_len);
 
-    uint32_t prev_offs = 0;
+    uint32_t prev_offs[nr_offs];
 
     size_t src_pos = 0;
     while (src_pos < src_len) {
         uint32_t factor_len = (uint32_t)aux[1 + 4 * src_pos];
         if (factor_len == 1) {
-            write_bit(&ctx, 1);
+            write_gr(&ctx, 0, 0);
 
             copy(src, src_pos, ctx.buf, ctx.pos, 1);
             src_pos += 1;
@@ -800,23 +828,30 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             uint32_t factor_offs = (uint32_t)aux[0 + 4 * src_pos];
             assert(factor_offs <= src_pos);
 
-            if (prev_offs != factor_offs) {
-                write_bit(&ctx, 0);
-                write_bit(&ctx, 1);
+            size_t i;
+            for (i = 0; i < nr_offs; i++)
+                if (prev_offs[i] == factor_offs)
+                    break;
+
+            if (i == nr_offs) {
+                write_gr(&ctx, 1, 0);
                 write_vnibble(&ctx, factor_offs >> 8);
                 ctx.buf[ctx.pos] = factor_offs & 0xffu;
                 ctx.pos += 1;
-                prev_offs = factor_offs;
             } else {
-                write_bit(&ctx, 0);
-                write_bit(&ctx, 0);
-                write_bit(&ctx, 1);
+                write_gr(&ctx, 2 + i, 0);
             }
+
+            for (i = min(i, nr_offs - 1); i > 0; i--)
+                prev_offs[i] = prev_offs[i - 1];
+            prev_offs[0] = factor_offs;
 
             write_gr(&ctx, factor_len - 4, 3);
             src_pos += factor_len;
         }
     }
+
+    write_gr(&ctx, 0, 0);
 
     vnibble_encode_ctx_fini(&ctx);
 
@@ -843,48 +878,50 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     struct vnibble_decode_ctx ctx;
     vnibble_decode_ctx_init(&ctx, src, src_len);
     size_t dst_pos = 0;
-    uint32_t prev_offs = 0;
+    uint32_t prev_offs[nr_offs];
 
-    while (ctx.pos < ctx.len) {
-        uint8_t code = 0;
-        while (read_bit(&ctx) == 0)
-            code += 1;
+    while (true) {
+        uint32_t code;
+        read_gr(&ctx, &code, 0);
 
-        switch (code) {
-            case 0: {
-                assert(ctx.pos < ctx.len);
-                assert(dst_pos < dst_len);
-                copy(ctx.buf, ctx.pos, dst, dst_pos, 1);
-                ctx.pos += 1;
-                dst_pos += 1;
+        if (code == 0) {
+            if (ctx.pos == ctx.len)
                 break;
-            }
 
-            case 1: {
-                uint32_t factor_offs;
+            assert(ctx.pos < ctx.len);
+            assert(dst_pos < dst_len);
+            copy(ctx.buf, ctx.pos, dst, dst_pos, 1);
+            ctx.pos += 1;
+            dst_pos += 1;
+            continue;
+        } else if (code == 1) {
+            uint32_t factor_offs;
 
-                read_vnibble(&ctx, &factor_offs);
-                factor_offs = (factor_offs << 8) | ctx.buf[ctx.pos];
-                ctx.pos += 1;
+            read_vnibble(&ctx, &factor_offs);
+            factor_offs = (factor_offs << 8) | ctx.buf[ctx.pos];
+            ctx.pos += 1;
 
-                prev_offs = factor_offs;
-                __attribute__ ((fallthrough));
-            }
+            for (size_t i = nr_offs - 1; i > 0; i--)
+                prev_offs[i] = prev_offs[i - 1];
+            prev_offs[0] = factor_offs;
+        } else {
+            uint32_t factor_offs = prev_offs[code - 2];
 
-            case 2: {
-                uint32_t factor_offs = prev_offs;
-
-                uint32_t factor_len;
-                read_gr(&ctx, &factor_len, 3);
-                factor_len += 4;
-
-                assert(dst_pos + factor_len - 1 < dst_len);
-                assert(factor_offs <= dst_pos);
-                copy_oaat(dst, dst_pos - factor_offs, dst, dst_pos, factor_len);
-                dst_pos += factor_len;
-                break;
-            }
+            for (size_t i = code - 2; i > 0; i--)
+                prev_offs[i] = prev_offs[i - 1];
+            prev_offs[0] = factor_offs;
         }
+
+        uint32_t factor_offs = prev_offs[0];
+
+        uint32_t factor_len;
+        read_gr(&ctx, &factor_len, 3);
+        factor_len += 4;
+
+        assert(dst_pos + factor_len - 1 < dst_len);
+        assert(factor_offs <= dst_pos);
+        copy_oaat(dst, dst_pos - factor_offs, dst, dst_pos, factor_len);
+        dst_pos += factor_len;
     }
 
     return (uint32_t)dst_pos;
