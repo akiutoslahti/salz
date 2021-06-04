@@ -233,7 +233,6 @@ static inline void write_gr(struct vnibble_encode_ctx *ctx, uint32_t val, size_t
 
 static inline void read_gr(struct vnibble_decode_ctx *ctx, uint32_t *res, size_t k)
 {
-
     uint32_t q = 0;
 
     while (read_bit(ctx) == 0)
@@ -245,9 +244,39 @@ static inline void read_gr(struct vnibble_decode_ctx *ctx, uint32_t *res, size_t
         *res = (*res << 1) | read_bit(ctx);
 }
 
+static inline size_t gamma_bitsize(uint32_t val)
+{
+    assert(val != 0);
+
+    return 1 + 2 * (31 - __builtin_clz(val));
+}
+
+static inline void read_gamma(struct vnibble_decode_ctx *ctx, uint32_t *res)
+{
+    *res = 1;
+
+    while (read_bit(ctx) == 0)
+        *res = (*res << 1) | read_bit(ctx);
+}
+
+static inline void write_gamma(struct vnibble_encode_ctx *ctx, uint32_t val)
+{
+    assert(val != 0);
+
+    if (val > 1) {
+        uint32_t mask = 1 << (30 - __builtin_clz(val));
+        while (mask > 0) {
+            write_bit(ctx, 0);
+            write_bit(ctx, val & mask ? 1 : 0);
+            mask >>= 1;
+        }
+    }
+
+    write_bit(ctx, 1);
+}
+
 static inline size_t vnibble_size(uint32_t val)
 {
-
     if (val < (1u << 3))
         return 1;
 
@@ -717,8 +746,16 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
     int32_t *mc = sa;
     mc[src_len] = 0;
+    size_t cnt = 1;
+    size_t next_inc = 2;
     for (size_t src_pos = src_len - 1; src_pos > 0; src_pos--) {
-        int32_t lcost = 9 + mc[src_pos + 1];
+        int32_t lcost = 8 + mc[src_pos + 1];
+        cnt += 1;
+
+        if (cnt == next_inc) {
+            lcost += 2;
+            next_inc <<= 1;
+        }
 
         int32_t offs1 = aux[0 + 4 * src_pos];
         int32_t len1 = aux[1 + 4 * src_pos];
@@ -749,10 +786,14 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             aux[0 + 4 * src_pos] = offs1;
             aux[1 + 4 * src_pos] = len1;
             mc[src_pos] = cost1;
+            cnt = 1;
+            next_inc = 2;
         } else {
             aux[0 + 4 * src_pos] = offs2;
             aux[1 + 4 * src_pos] = len2;
             mc[src_pos] = cost2;
+            cnt = 1;
+            next_inc = 2;
         }
     }
 
@@ -764,16 +805,23 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     vnibble_encode_ctx_init(&ctx, dst, dst_len);
 
     size_t src_pos = 0;
+    uint32_t literals = 0;
     while (src_pos < src_len) {
         uint32_t factor_len = (uint32_t)aux[1 + 4 * src_pos];
         if (factor_len == 1) {
-            write_bit(&ctx, 0);
-
-            copy(src, src_pos, ctx.buf, ctx.pos, 1);
+            literals += 1;
             src_pos += 1;
-            ctx.pos += 1;
         } else {
-            write_bit(&ctx, 1);
+            write_gamma(&ctx, literals + 1);
+
+            if (literals > 0) {
+                size_t copy_pos = src_pos - literals;
+                assert(src_pos + literals - 1 < src_len);
+                assert(ctx.pos + literals - 1 < ctx.len);
+                copy(src, copy_pos, ctx.buf, ctx.pos, literals);
+                ctx.pos += literals;
+                literals = 0;
+            }
 
             uint32_t factor_offs = (uint32_t)aux[0 + 4 * src_pos];
             assert(factor_offs <= src_pos);
@@ -781,10 +829,19 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             ctx.buf[ctx.pos] = factor_offs & 0xffu;
             ctx.pos += 1;
 
-            //write_vnibble(&ctx, factor_len - 4);
             write_gr(&ctx, factor_len - 4, 3);
             src_pos += factor_len;
         }
+    }
+
+    write_gamma(&ctx, literals + 1);
+
+    if (literals > 0) {
+        size_t copy_pos = src_pos - literals;
+        assert(src_pos + literals - 1 < src_len);
+        assert(ctx.pos + literals - 1 < ctx.len);
+        copy(src, copy_pos, ctx.buf, ctx.pos, literals);
+        ctx.pos += literals;
     }
 
     vnibble_encode_ctx_fini(&ctx);
@@ -814,33 +871,35 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     size_t dst_pos = 0;
 
     while (ctx.pos < ctx.len) {
-        uint8_t flag = read_bit(&ctx);
+        uint32_t literals;
+        read_gamma(&ctx, &literals);
+        literals -= 1;
 
-        if (flag) {
-            uint32_t factor_offs;
-
-            read_vnibble(&ctx, &factor_offs);
-            factor_offs = (factor_offs << 8) | ctx.buf[ctx.pos];
-            ctx.pos += 1;
-
-            uint32_t factor_len;
-            //read_vnibble(&ctx, &factor_len);
-            read_gr(&ctx, &factor_len, 3);
-            factor_len += 4;
-
-            assert(dst_pos + factor_len - 1 < dst_len);
-            assert(factor_offs <= dst_pos);
-            copy_oaat(dst, dst_pos - factor_offs, dst, dst_pos, factor_len);
-            dst_pos += factor_len;
-        } else {
-
-            assert(ctx.pos < ctx.len);
-            assert(dst_pos < dst_len);
-            copy(ctx.buf, ctx.pos, dst, dst_pos, 1);
-            ctx.pos += 1;
-            dst_pos += 1;
+        if (literals > 0) {
+            assert(ctx.pos + literals - 1 < ctx.len);
+            assert(dst_pos + literals - 1 < dst_len);
+            copy(ctx.buf, ctx.pos, dst, dst_pos, literals);
+            ctx.pos += literals;
+            dst_pos += literals;
         }
 
+        if (ctx.pos == ctx.len)
+            break;
+
+        uint32_t factor_offs;
+
+        read_vnibble(&ctx, &factor_offs);
+        factor_offs = (factor_offs << 8) | ctx.buf[ctx.pos];
+        ctx.pos += 1;
+
+        uint32_t factor_len;
+        read_gr(&ctx, &factor_len, 3);
+        factor_len += 4;
+
+        assert(dst_pos + factor_len - 1 < dst_len);
+        assert(factor_offs <= dst_pos);
+        copy_oaat(dst, dst_pos - factor_offs, dst, dst_pos, factor_len);
+        dst_pos += factor_len;
     }
 
     return (uint32_t)dst_pos;
