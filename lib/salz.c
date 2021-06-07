@@ -246,37 +246,14 @@ static inline void read_gr(struct decode_ctx *ctx, uint32_t *res, size_t k)
 
 static inline size_t vnibble_size(uint32_t val)
 {
-    if (val < (1u << 3))
-        return 1;
+    size_t vnibble_len = 1;
 
-    if (val < (1u << 6))
-        return 2;
+    while (val >>= 3) {
+        val -= 1;
+        vnibble_len += 1;
+    }
 
-    if (val < (1u << 9))
-        return 3;
-
-    if (val < (1u << 12))
-        return 4;
-
-    if (val < (1u << 15))
-        return 5;
-
-    if (val < (1u << 18))
-        return 6;
-
-    if (val < (1u << 21))
-        return 7;
-
-    if (val < (1u << 24))
-        return 8;
-
-    if (val < (1u << 27))
-        return 9;
-
-    if (val < (1u << 30))
-        return 10;
-
-    return 11;
+    return vnibble_len;
 }
 
 static inline size_t vnibble_bitsize(uint32_t val)
@@ -284,176 +261,55 @@ static inline size_t vnibble_bitsize(uint32_t val)
     return 4 * vnibble_size(val);
 }
 
-static inline size_t read_vnibble(struct decode_ctx *ctx, uint32_t *res)
+static inline void read_vnibble(struct decode_ctx *ctx, uint32_t *res)
 {
-    uint8_t nibble;
-
-    nibble = read_nibble(ctx);
+    uint8_t nibble = read_nibble(ctx);
     *res = nibble & 0x7u;
-    if (nibble >= 0x8u)
-        return 1;
 
-    nibble = read_nibble(ctx);
-    *res = ((nibble & 0x7u) << 3) | *res;
-    if (nibble >= 0x8u)
-        return 2;
-
-    nibble = read_nibble(ctx);
-    *res = ((nibble & 0x7u) << 6) | *res;
-    if (nibble >= 0x8u)
-        return 3;
-
-    nibble = read_nibble(ctx);
-    *res = ((nibble & 0x7u) << 9) | *res;
-    if (nibble >= 0x8u)
-        return 4;
-
-    nibble = read_nibble(ctx);
-    *res = ((nibble & 0x7u) << 12) | *res;
-    if (nibble >= 0x8u)
-        return 5;
-
-    nibble = read_nibble(ctx);
-    *res = ((nibble & 0x7u) << 15) | *res;
-    if (nibble >= 0x8u)
-        return 6;
-
-    nibble = read_nibble(ctx);
-    *res = ((nibble & 0x7u) << 18) | *res;
-    if (nibble >= 0x8u)
-        return 7;
-
-    nibble = read_nibble(ctx);
-    *res = ((nibble & 0x7u) << 21) | *res;
-    if (nibble >= 0x8u)
-        return 8;
-
-    nibble = read_nibble(ctx);
-    *res = ((nibble & 0x7u) << 24) | *res;
-    if (nibble >= 0x8u)
-        return 9;
-
-    nibble = read_nibble(ctx);
-    *res = ((nibble & 0x7u) << 27) | *res;
-    if (nibble >= 0x8u)
-        return 10;
-
-    nibble = read_nibble(ctx);
-    *res = ((nibble & 0x7u) << 30) | *res;
-    return 11;
+    while (nibble < 0x8u) {
+        nibble = read_nibble(ctx);
+        *res += 1;
+        *res = (*res << 3) | (nibble & 0x7u);
+    }
 }
 
 static inline size_t encode_vnibble(uint32_t val, uint64_t *res)
 {
-    uint8_t *p = (uint8_t *)res;
+    size_t vnibble_len = 1;
+    *res = (val & 0x7u) | 0x8u;
 
-    if (val < (1u << 3)) {
-        p[0] = val | 0x8u;
-        return 1;
+    while (val >>= 3) {
+        val -= 1;
+        *res = (*res << 4) | (val & 0x7u);
+        vnibble_len += 1;
     }
 
-    if (val < (1u << 6)) {
-        p[0] = (val & 0x7u) | (((val >> 3) | 0x8u) << 4);
-        return 2;
-    }
-
-    if (val < (1u << 9)) {
-        p[0] = (val & 0x7u) | (((val >> 3) & 0x7u) << 4);
-        p[1] = (val >> 6) | 0x8u;
-        return 3;
-    }
-
-    if (val < (1u << 12)) {
-        p[0] = (val & 0x7u) | (((val >> 3) & 0x7u) << 4);
-        p[1] = ((val >> 6) & 0x7u) | (((val >> 9) | 0x8u) << 4);
-        return 4;
-    }
-
-    if (val < (1u << 15)) {
-        p[0] = (val & 0x7u) | (((val >> 3) & 0x7u) << 4);
-        p[1] = ((val >> 6) & 0x7u) | (((val >> 9) & 0x7u) << 4);
-        p[2] = (val >> 12) | 0x8u;
-        return 5;
-    }
-
-    if (val < (1u << 18)) {
-        p[0] = (val & 0x7u) | (((val >> 3) & 0x7u) << 4);
-        p[1] = ((val >> 6) & 0x7u) | (((val >> 9) & 0x7u) << 4);
-        p[2] = ((val >> 12) & 0x7u) | (((val >> 15) | 0x8u) << 4);
-        return 6;
-    }
-
-    if (val < (1u << 21)) {
-        p[0] = (val & 0x7u) | (((val >> 3) & 0x7u) << 4);
-        p[1] = ((val >> 6) & 0x7u) | (((val >> 9) & 0x7u) << 4);
-        p[2] = ((val >> 12) & 0x7u) | (((val >> 15) & 0x7u) << 4);
-        p[3] = (val >> 18) | 0x8u;
-        return 7;
-    }
-
-    if (val < (1u << 24)) {
-        p[0] = (val & 0x7u) | (((val >> 3) & 0x7u) << 4);
-        p[1] = ((val >> 6) & 0x7u) | (((val >> 9) & 0x7u) << 4);
-        p[2] = ((val >> 12) & 0x7u) | (((val >> 15) & 0x7u) << 4);
-        p[3] = ((val >> 18) & 0x7u) | (((val >> 21) | 0x8u) << 4);
-        return 8;
-    }
-
-    if (val < (1u << 27)) {
-        p[0] = (val & 0x7u) | (((val >> 3) & 0x7u) << 4);
-        p[1] = ((val >> 6) & 0x7u) | (((val >> 9) & 0x7u) << 4);
-        p[2] = ((val >> 12) & 0x7u) | (((val >> 15) & 0x7u) << 4);
-        p[3] = ((val >> 18) & 0x7u) | (((val >> 21) & 0x7u) << 4);
-        p[4] = (val >> 24) | 0x8u;
-        return 9;
-    }
-
-    if (val < (1u << 30)) {
-        p[0] = (val & 0x7u) | (((val >> 3) & 0x7u) << 4);
-        p[1] = ((val >> 6) & 0x7u) | (((val >> 9) & 0x7u) << 4);
-        p[2] = ((val >> 12) & 0x7u) | (((val >> 15) & 0x7u) << 4);
-        p[3] = ((val >> 18) & 0x7u) | (((val >> 21) & 0x7u) << 4);
-        p[4] = ((val >> 24) & 0x7u) | (((val >> 27) | 0x8u) << 4);
-        return 10;
-    }
-
-    p[0] = (val & 0x7u) | (((val >> 3) & 0x7u) << 4);
-    p[1] = ((val >> 6) & 0x7u) | (((val >> 9) & 0x7u) << 4);
-    p[2] = ((val >> 12) & 0x7u) | (((val >> 15) & 0x7u) << 4);
-    p[3] = ((val >> 18) & 0x7u) | (((val >> 21) & 0x7u) << 4);
-    p[4] = ((val >> 24) & 0x7u) | (((val >> 27) & 0x7u) << 4);
-    p[5] = (val >> 30) | 0x8u;
-    return 11;
+    return vnibble_len;
 }
 
 static inline void write_vnibble(struct encode_ctx *ctx, uint32_t val)
 {
-    uint64_t vnibble = 0;
-    size_t vnibble_len = encode_vnibble(val, &vnibble);
+    uint64_t nibbles;
+    size_t nibbles_len = encode_vnibble(val, &nibbles);
 
-    while (vnibble_len > 0) {
-        uint8_t nibble = vnibble & 0xfu;
+    while (nibbles_len > 0) {
+        uint8_t nibble = nibbles & 0xfu;
         write_nibble(ctx, nibble);
-        vnibble >>= 4;
-        vnibble_len -= 1;
+        nibbles >>= 4;
+        nibbles_len -= 1;
     }
 }
 
 static inline size_t vbyte_size(uint32_t val)
 {
-    if (val < (1u << 7))
-        return 1;
+    size_t vbyte_len = 1;
 
-    if (val < (1u << 14))
-        return 2;
+    while (val >>= 7) {
+        val -= 1;
+        vbyte_len += 1;
+    }
 
-    if (val < (1u << 21))
-        return 3;
-
-    if (val < (1u << 28))
-        return 4;
-
-    return 5;
+    return vbyte_len;
 }
 
 static inline size_t vbyte_bitsize(uint32_t val)
@@ -461,136 +317,45 @@ static inline size_t vbyte_bitsize(uint32_t val)
     return 8 * vbyte_size(val);
 }
 
-static inline size_t read_vbyte(uint8_t *src, size_t src_len, size_t pos,
-        uint32_t *res)
+static inline void read_vbyte(struct decode_ctx *ctx, uint32_t *res)
 {
-#ifdef NDEBUG
-    unused(src_len);
-#endif
+    uint8_t byte = ctx->buf[ctx->pos];
+    ctx->pos += 1;
+    *res = byte & 0x7fu;
 
-    uint8_t *p = &src[pos];
-
-    assert(pos < src_len);
-    *res = p[0] & 0x7fu;
-    if (p[0] >= 0x80u)
-        return 1;
-
-    assert(pos + 1 < src_len);
-    *res = ((p[1] & 0x7fu) << 7) | *res;
-    if (p[1] >= 0x80u)
-        return 2;
-
-    assert(pos + 2 < src_len);
-    *res = ((p[2] & 0x7fu) << 14) | *res;
-    if (p[2] >= 0x80u)
-        return 3;
-
-    assert(pos + 3 < src_len);
-    *res = ((p[3] & 0x7fu) << 21) | *res;
-    if (p[3] >= 0x80u)
-        return 4;
-
-    assert(pos + 4 < src_len);
-    *res = ((p[4] & 0x7fu) << 28) | *res;
-    return 5;
+    while (byte < 0x80u) {
+        byte = ctx->buf[ctx->pos];
+        ctx->pos += 1;
+        *res += 1;
+        *res = (*res << 7) | (byte & 0x7fu);
+    }
 }
 
 static inline size_t encode_vbyte(uint32_t val, uint64_t *res)
 {
-    uint8_t *p = (uint8_t *)res;
+    size_t vbyte_len = 1;
+    *res = (val & 0x7fu) | 0x80u;
 
-    if (val < (1u << 7)) {
-        p[0] = val | 0x80u;
-        return 1;
+    while (val >>= 7) {
+        val -= 1;
+        *res = (*res << 8) | (val & 0x7fu);
+        vbyte_len += 1;
     }
-
-    if (val < (1u << 14)) {
-        p[0] = val & 0x7fu;
-        p[1] = (val >> 7) | 0x80u;
-        return 2;
-    }
-
-    if (val < (1u << 21)) {
-        p[0] = val & 0x7fu;
-        p[1] = (val >> 7) & 0x7fu;
-        p[2] = (val >> 14) | 0x80u;
-        return 3;
-    }
-
-    if (val < (1u << 28)) {
-        p[0] = val & 0x7fu;
-        p[1] = (val >> 7) & 0x7fu;
-        p[2] = (val >> 14) & 0x7fu;
-        p[3] = (val >> 21) | 0x80u;
-        return 4;
-    }
-
-    p[0] = val & 0x7fu;
-    p[1] = (val >> 7) & 0x7fu;
-    p[2] = (val >> 14) & 0x7fu;
-    p[3] = (val >> 21) & 0x7fu;
-    p[4] = (val >> 28) | 0x80u;
-    return 5;
-}
-
-static inline size_t write_vbyte(uint8_t *dst, size_t dst_len, size_t pos,
-        uint32_t val)
-{
-#ifdef NDEBUG
-    unused(dst_len);
-#endif
-
-    uint64_t vbyte;
-    size_t vbyte_len = encode_vbyte(val, &vbyte);
-
-    assert(pos + vbyte_len - 1 < dst_len);
-    memcpy(&dst[pos], &vbyte, vbyte_len);
 
     return vbyte_len;
 }
 
-static inline size_t write_lsic(uint8_t *dst, size_t dst_len, size_t pos,
-        uint32_t val)
+static inline void write_vbyte(struct encode_ctx *ctx, uint32_t val)
 {
-#ifdef NDEBUG
-    unused(dst_len);
-#endif
+    uint64_t bytes;
+    size_t bytes_len = encode_vbyte(val, &bytes);
 
-    size_t orig_pos = pos;
-
-    while (val >= 255) {
-        assert(pos < dst_len);
-        dst[pos] = 255;
-        pos += 1;
-        val -= 255;
+    while (bytes_len > 0) {
+        ctx->buf[ctx->pos] = bytes & 0xffu;
+        ctx->pos += 1;
+        bytes >>= 8;
+        bytes_len -= 1;
     }
-    assert(pos < dst_len);
-    dst[pos] = val;
-
-    return pos - orig_pos + 1;
-}
-
-static inline size_t read_lsic(uint8_t *src, size_t src_len, size_t pos,
-        uint32_t *res)
-{
-#ifdef NDEBUG
-    unused(src_len);
-#endif
-
-    uint32_t val = 0;
-    uint8_t read_more;
-    size_t orig_pos = pos;
-
-    do {
-        assert(pos < src_len);
-        read_more = src[pos];
-        pos += 1;
-        val += read_more;
-    } while (read_more == 0xff);
-
-    *res = val;
-
-    return pos - orig_pos;
 }
 
 static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
@@ -770,7 +535,6 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             copy(src, src_pos, ctx.buf, ctx.pos, 1);
             src_pos += 1;
             ctx.pos += 1;
-            debug("literal");
         } else {
             write_bit(&ctx, 1);
 
@@ -782,7 +546,6 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
             write_gr(&ctx, factor_len - 3, 3);
             src_pos += factor_len;
-            debug("offset: %d, len: %d", factor_offs, factor_len);
         }
     }
 
