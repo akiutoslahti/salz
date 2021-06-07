@@ -62,6 +62,13 @@ static inline uint16_t read_u16(uint8_t *src, size_t pos)
     return val;
 }
 
+static inline uint32_t read_u32(uint8_t *src, size_t pos)
+{
+    uint32_t val;
+    memcpy(&val, &src[pos], sizeof(val));
+    return val;
+}
+
 static inline uint64_t read_u64(uint8_t *src, size_t pos)
 {
     uint64_t val;
@@ -70,6 +77,11 @@ static inline uint64_t read_u64(uint8_t *src, size_t pos)
 }
 
 static inline void write_u16(uint8_t *dst, size_t pos, uint16_t val)
+{
+    memcpy(&dst[pos], &val, sizeof(val));
+}
+
+static inline void write_u32(uint8_t *dst, size_t pos, uint32_t val)
 {
     memcpy(&dst[pos], &val, sizeof(val));
 }
@@ -593,6 +605,73 @@ static inline size_t read_lsic(uint8_t *src, size_t src_len, size_t pos,
     return pos - orig_pos;
 }
 
+static inline size_t lsic2_bitsize(uint32_t val)
+{
+    if (val < 15)
+        return 4;
+
+    if (val < 270)
+        return 12;
+
+    if (val < 65805)
+        return 28;
+
+    return 60;
+}
+
+static inline size_t write_lsic2(struct encode_ctx *ctx, uint32_t val)
+{
+    if (val < 15) {
+        write_nibble(ctx, val);
+        return 4;
+    }
+
+    if (val < 270) {
+        write_nibble(ctx, 15);
+        ctx->buf[ctx->pos] = val - 15;
+        ctx->pos += 1;
+        return 12;
+    }
+
+    if (val < 65805) {
+        write_nibble(ctx, 15);
+        ctx->buf[ctx->pos] = 255;
+        ctx->pos += 1;
+        write_u16(ctx->buf, ctx->pos, val - 15 - 255);
+        ctx->pos += 2;
+        return 28;
+    }
+
+    write_nibble(ctx, 15);
+    ctx->buf[ctx->pos] = 255;
+    ctx->pos += 1;
+    write_u16(ctx->buf, ctx->pos, 65535);
+    ctx->pos += 2;
+    write_u32(ctx->buf, ctx->pos, val - 15 - 255 - 65535);
+    ctx->pos += 4;
+    return 60;
+}
+
+static inline void read_lsic2(struct decode_ctx *ctx, uint32_t *res)
+{
+    *res = read_nibble(ctx);
+
+    if (*res == 15) {
+        *res += ctx->buf[ctx->pos];
+        ctx->pos += 1;
+    }
+
+    if (*res == 270) {
+        *res += read_u16(ctx->buf, ctx->pos);
+        ctx->pos += 2;
+    }
+
+    if (*res == 65805) {
+        *res += read_u32(ctx->buf, ctx->pos);
+        ctx->pos += 4;
+    }
+}
+
 static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
         size_t pos1, size_t pos2)
 {
@@ -726,7 +805,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             cost1 = lcost + 1;
         else
             cost1 = 1 + 8 + vnibble_bitsize((offs1 - 1) >> 8) +
-                    gr_bitsize(len1 - 3, 3) +
+                    lsic2_bitsize(len1 - 3) +
                     mc[src_pos + len1];
 
         int32_t offs2 = aux[2 + 4 * src_pos];
@@ -737,7 +816,7 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             cost2 = lcost + 1;
         else
             cost2 = 1 + 8 + vnibble_bitsize((offs2 - 1) >> 8) +
-                    gr_bitsize(len2 - 3, 3) +
+                    lsic2_bitsize(len2 - 3) +
                     mc[src_pos + len2];
 
         if (lcost <= cost1 && lcost <= cost2) {
@@ -780,7 +859,8 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             ctx.buf[ctx.pos] = (factor_offs - 1) & 0xffu;
             ctx.pos += 1;
 
-            write_gr(&ctx, factor_len - 3, 3);
+            //write_gr(&ctx, factor_len - 3, 3);
+            write_lsic2(&ctx, factor_len - 3);
             src_pos += factor_len;
             debug("offset: %d, len: %d", factor_offs, factor_len);
         }
@@ -824,7 +904,8 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             factor_offs += 1;
 
             uint32_t factor_len;
-            read_gr(&ctx, &factor_len, 3);
+            //read_gr(&ctx, &factor_len, 3);
+            read_lsic2(&ctx, &factor_len);
             factor_len += 3;
 
             assert(dst_pos + factor_len - 1 < dst_len);
