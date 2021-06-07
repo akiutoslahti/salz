@@ -7,8 +7,8 @@
  * See file LICENSE or a copy at <https://opensource.org/licenses/MIT>.
  */
 
-#include <string.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include "salz.h"
 #include "divsufsort.h"
@@ -231,17 +231,17 @@ static inline void write_gr(struct encode_ctx *ctx, uint32_t val, size_t k)
         write_bit(ctx, val & (1 << i) ? 1 : 0);
 }
 
-static inline void read_gr(struct decode_ctx *ctx, uint32_t *res, size_t k)
+static inline uint32_t read_gr(struct decode_ctx *ctx, size_t k)
 {
-    uint32_t q = 0;
+    uint32_t ret = 0;
 
     while (read_bit(ctx) == 0)
-        q += 1;
-
-    *res = q;
+        ret += 1;
 
     for (int32_t i = k - 1; i >= 0; i--)
-        *res = (*res << 1) | read_bit(ctx);
+        ret = (ret << 1) | read_bit(ctx);
+
+    return ret;
 }
 
 static inline size_t vnibble_size(uint32_t val)
@@ -261,16 +261,18 @@ static inline size_t vnibble_bitsize(uint32_t val)
     return 4 * vnibble_size(val);
 }
 
-static inline void read_vnibble(struct decode_ctx *ctx, uint32_t *res)
+static inline uint32_t read_vnibble(struct decode_ctx *ctx)
 {
     uint8_t nibble = read_nibble(ctx);
-    *res = nibble & 0x7u;
+    uint32_t ret = nibble & 0x7u;
 
     while (nibble < 0x8u) {
         nibble = read_nibble(ctx);
-        *res += 1;
-        *res = (*res << 3) | (nibble & 0x7u);
+        ret += 1;
+        ret = (ret << 3) | (nibble & 0x7u);
     }
+
+    return ret;
 }
 
 static inline size_t encode_vnibble(uint32_t val, uint64_t *res)
@@ -317,18 +319,20 @@ static inline size_t vbyte_bitsize(uint32_t val)
     return 8 * vbyte_size(val);
 }
 
-static inline void read_vbyte(struct decode_ctx *ctx, uint32_t *res)
+static inline uint32_t read_vbyte(struct decode_ctx *ctx)
 {
     uint8_t byte = ctx->buf[ctx->pos];
     ctx->pos += 1;
-    *res = byte & 0x7fu;
+    uint32_t ret = byte & 0x7fu;
 
     while (byte < 0x80u) {
         byte = ctx->buf[ctx->pos];
         ctx->pos += 1;
-        *res += 1;
-        *res = (*res << 7) | (byte & 0x7fu);
+        ret += 1;
+        ret = (ret << 7) | (byte & 0x7fu);
     }
+
+    return ret;
 }
 
 static inline size_t encode_vbyte(uint32_t val, uint64_t *res)
@@ -356,6 +360,57 @@ static inline void write_vbyte(struct encode_ctx *ctx, uint32_t val)
         bytes >>= 8;
         bytes_len -= 1;
     }
+}
+
+static size_t factor_offs_bitsize(uint32_t val)
+{
+    val -= 1;
+
+    size_t ret = 8 + vnibble_bitsize(val >> 8);
+
+    return ret;
+}
+
+static inline void write_factor_offs(struct encode_ctx *ctx, uint32_t val)
+{
+    val -= 1;
+
+    write_vnibble(ctx, val >> 8);
+    ctx->buf[ctx->pos] = val & 0xffu;
+    ctx->pos += 1;
+}
+
+static inline uint32_t read_factor_offs(struct decode_ctx *ctx)
+{
+    uint32_t ret = (read_vnibble(ctx) << 8) | ctx->buf[ctx->pos];
+    ctx->pos += 1;
+    ret += 1;
+
+    return ret;
+}
+
+static size_t factor_len_bitsize(uint32_t val)
+{
+    val -= 3;
+
+    size_t ret = gr_bitsize(val, 3);
+
+    return ret;
+}
+
+static inline void write_factor_len(struct encode_ctx *ctx, uint32_t val)
+{
+    val -= 3;
+
+    write_gr(ctx, val, 3);
+}
+
+static inline uint32_t read_factor_len(struct decode_ctx *ctx)
+{
+    uint32_t ret = read_gr(ctx, 3);
+    ret += 3;
+
+    return ret;
 }
 
 static inline size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
@@ -490,8 +545,8 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         if (len1 < 3)
             cost1 = lcost + 1;
         else
-            cost1 = 1 + 8 + vnibble_bitsize((offs1 - 1) >> 8) +
-                    gr_bitsize(len1 - 3, 3) +
+            cost1 = 1 + factor_offs_bitsize(offs1) +
+                    factor_len_bitsize(len1) +
                     mc[src_pos + len1];
 
         int32_t offs2 = aux[2 + 4 * src_pos];
@@ -501,14 +556,16 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         if (len2 < 3)
             cost2 = lcost + 1;
         else
-            cost2 = 1 + 8 + vnibble_bitsize((offs2 - 1) >> 8) +
-                    gr_bitsize(len2 - 3, 3) +
+            cost2 = 1 + factor_offs_bitsize(offs2) +
+                    factor_len_bitsize(len2) +
                     mc[src_pos + len2];
 
-        if (lcost <= cost1 && lcost <= cost2) {
+        int32_t mincost = min(lcost, min(cost1, cost2));
+
+        if (lcost == mincost) {
             aux[1 + 4 * src_pos] = 1;
             mc[src_pos] = lcost;
-        } else if (cost1 < lcost && cost1 < cost2) {
+        } else if (cost1 == mincost) {
             aux[0 + 4 * src_pos] = offs1;
             aux[1 + 4 * src_pos] = len1;
             mc[src_pos] = cost1;
@@ -540,11 +597,9 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
             uint32_t factor_offs = (uint32_t)aux[0 + 4 * src_pos];
             assert(factor_offs <= src_pos);
-            write_vnibble(&ctx, (factor_offs - 1) >> 8);
-            ctx.buf[ctx.pos] = (factor_offs - 1) & 0xffu;
-            ctx.pos += 1;
+            write_factor_offs(&ctx, factor_offs);
 
-            write_gr(&ctx, factor_len - 3, 3);
+            write_factor_len(&ctx, factor_len);
             src_pos += factor_len;
         }
     }
@@ -579,16 +634,8 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         uint8_t flag = read_bit(&ctx);
 
         if (flag) {
-            uint32_t factor_offs;
-
-            read_vnibble(&ctx, &factor_offs);
-            factor_offs = (factor_offs << 8) | ctx.buf[ctx.pos];
-            ctx.pos += 1;
-            factor_offs += 1;
-
-            uint32_t factor_len;
-            read_gr(&ctx, &factor_len, 3);
-            factor_len += 3;
+            uint32_t factor_offs = read_factor_offs(&ctx);
+            uint32_t factor_len = read_factor_len(&ctx);
 
             assert(dst_pos + factor_len - 1 < dst_len);
             assert(factor_offs <= dst_pos);
