@@ -302,6 +302,70 @@ static inline void write_vnibble(struct encode_ctx *ctx, uint32_t val)
     }
 }
 
+static inline size_t vlq_size(uint32_t val, size_t k)
+{
+    size_t vlq_len = 1;
+
+    while (val >>= k) {
+        val -= 1;
+        vlq_len += 1;
+    }
+
+    return vlq_len;
+}
+
+static inline size_t vlq_bitsize(uint32_t val, size_t k)
+{
+    return (k + 1) * vlq_size(val, k);
+}
+
+static inline uint32_t read_vlq(struct decode_ctx *ctx, size_t k)
+{
+    uint32_t part = 0;
+    for (size_t i = 0; i < k + 1; i++)
+        part = (part << 1) | read_bit(ctx);
+
+    uint32_t ret = part & ((1u << k) - 1);
+
+    while (part < (1u << k)) {
+        part = 0;
+        for (size_t i = 0; i < k + 1; i++)
+            part = (part << 1) | read_bit(ctx);
+        ret += 1;
+        ret = (ret << k) | (part & ((1u << k) - 1));
+    }
+
+    return ret;
+}
+
+static inline size_t encode_vlq(uint32_t val, uint64_t *res, size_t k)
+{
+    size_t vlq_len = 1;
+    *res = (val & ((1u << k) - 1)) | (1u << k);
+
+    while (val >>= k) {
+        val -= 1;
+        *res = (*res << (k + 1)) | (val & ((1u << k) - 1));
+        vlq_len += 1;
+    }
+
+    return vlq_len;
+}
+
+static inline void write_vlq(struct encode_ctx *ctx, uint32_t val, size_t k)
+{
+    uint64_t parts;
+    size_t parts_len = encode_vlq(val, &parts, k);
+
+    while (parts_len > 0) {
+        uint32_t mask = 1u << (k + 1);
+        while (mask >>= 1)
+            write_bit(ctx, parts & mask ? 1 : 0);
+        parts >>= (k + 1);
+        parts_len -= 1;
+    }
+}
+
 static inline size_t vbyte_size(uint32_t val)
 {
     size_t vbyte_len = 1;
