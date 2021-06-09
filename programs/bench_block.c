@@ -187,6 +187,7 @@ static double compute_lcp_mean(uint8_t *text, int32_t *sa, size_t n,
     }
 
     lcp_sum = 0;
+
     for (i = 1; i < n; i++)
         lcp_sum += plcp[sa[i]];
 
@@ -246,8 +247,8 @@ int main(int argc, const char *argv[])
     }
 
     printf("filename,block size (log2),block size (b),io time (s),"
-           "divsufsort time (s),sais time (s),kkp2 time (s),kkp3 time (s),"
-           "lcp mean,phrases (nr)\n");
+           "divsufsort time (s),sais time (s),lcp time (s),kkp2 time (s)"
+           ",kkp3 time (s),lcp mean,phrases (nr)\n");
 
     for (size_t log2_bs = log2_min_bs; log2_bs <= log2_max_bs; log2_bs++) {
         uint8_t *block;
@@ -260,6 +261,7 @@ int main(int argc, const char *argv[])
         uint64_t start_ns;
         uint64_t io_ns = 0;
         uint64_t divsufsort_ns = 0;
+        uint64_t lcp_ns = 0;
         uint64_t sais_ns = 0;
         uint64_t kkp2_ns = 0;
         uint64_t kkp3_ns = 0;
@@ -310,8 +312,11 @@ int main(int argc, const char *argv[])
             }
 
             /* mean lcp */
+            start_ns = get_time_ns();
             lcp_mean_block = compute_lcp_mean(block, sa + 1, bytes_read, aux,
                                               aux_len);
+            lcp_ns += get_time_ns() - start_ns;
+
             /* weigh mean if last block is short */
             if (bytes_read != block_len)
                 lcp_mean = (lcp_mean * prev_blocks * block_len +
@@ -379,13 +384,14 @@ int main(int argc, const char *argv[])
             rc = 1;
         }
 
-        printf("%s,%zu,%ld,%.5f,%.5f,%.5f,%.5f,%.5f,%.1f,%zu\n",
+        printf("%s,%zu,%ld,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.1f,%zu\n",
                fname,
                log2_bs,
                block_len,
                1.0 * io_ns / NS_IN_SEC,
                1.0 * divsufsort_ns / NS_IN_SEC,
                1.0 * sais_ns / NS_IN_SEC,
+               1.0 * lcp_ns / NS_IN_SEC,
                1.0 * kkp2_ns / NS_IN_SEC,
                1.0 * kkp3_ns / NS_IN_SEC,
                lcp_mean,
