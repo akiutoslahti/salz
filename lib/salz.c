@@ -653,6 +653,10 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         if (factor_len == 1) {
             write_bit(&ctx, 0);
 
+#ifdef ENABLE_STATS
+            st.literals[src[src_pos]] += 1;
+#endif
+
             copy(src, src_pos, ctx.buf, ctx.pos, 1);
             src_pos += 1;
             ctx.pos += 1;
