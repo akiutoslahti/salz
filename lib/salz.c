@@ -11,7 +11,7 @@
 #include <string.h>
 
 #include "salz.h"
-#include "divsufsort.h"
+#include "libsais.h"
 
 #ifdef NDEBUG
 #   ifndef assert
@@ -590,8 +590,8 @@ uint32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     start_clock();
 #endif
 
-    if (divsufsort(src, sa + 1, src_len)) {
-        debug("divsufsort failed");
+    if (libsais(src, sa + 1, src_len, 0)) {
+        debug("libsais failed");
         goto clean;
     }
 
