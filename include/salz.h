@@ -27,8 +27,19 @@ struct stats {
 extern struct stats *get_stats(void);
 #endif
 
-extern uint32_t salz_encode_default(uint8_t *src, size_t src_len,
-        uint8_t *dst, size_t dst_len);
+struct encode_ctx {
+    int32_t *sa;
+    size_t sa_len;
+    int32_t *aux;
+    size_t aux_len;
+};
+
+extern void encode_ctx_init(struct encode_ctx **ctx, size_t src_len);
+
+extern void encode_ctx_fini(struct encode_ctx **ctx);
+
+extern uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
+        size_t src_len, uint8_t *dst, size_t dst_len);
 
 extern uint32_t salz_decode_default(uint8_t *src, size_t src_len,
         uint8_t *dst, size_t dst_len);

@@ -81,6 +81,8 @@ static int compress_fname(char *in_fname, char *out_fname,
     int ret = 0;
     uint64_t clock;
 
+    struct encode_ctx *ctx;
+
     block_size = 1 << log2_block_size;
     src_len = block_size;
     /* @TODO formulate maximum compressed size better */
@@ -98,8 +100,9 @@ static int compress_fname(char *in_fname, char *out_fname,
 
     src_buf = malloc(src_len);
     dst_buf = malloc(dst_len);
+    encode_ctx_init(&ctx, src_len);
 
-    if (src_buf == NULL || dst_buf == NULL)
+    if (src_buf == NULL || dst_buf == NULL || ctx == NULL)
         goto fail;
 
     clock = get_time_ns();
@@ -113,8 +116,8 @@ static int compress_fname(char *in_fname, char *out_fname,
 
     while ((read_len = fread(src_buf, 1, src_len, in_stream)) != 0) {
         in_fsize += read_len;
-        uint32_t encoded_len = salz_encode_default(src_buf, read_len, dst_buf,
-                                                   dst_len);
+        uint32_t encoded_len = salz_encode_default(ctx, src_buf, read_len,
+                                                   dst_buf, dst_len);
 
         if (encoded_len == 0) {
             /* @TODO add error ? */
@@ -156,6 +159,7 @@ exit:
         fclose(out_stream);
     free(src_buf);
     free(dst_buf);
+    encode_ctx_fini(&ctx);
 
     return ret;
 
