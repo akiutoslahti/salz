@@ -37,6 +37,8 @@
 
 #define unused(var) ((void)var)
 
+#define array_len(arr) (sizeof(arr) / sizeof(arr[0]))
+
 #ifdef ENABLE_STATS
     struct stats st;
 
@@ -672,6 +674,10 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src, size_t src_le
 
 #ifdef ENABLE_STATS
     increment_clock(st.mincost_time);
+
+    size_t nr_factor = 0;
+    size_t prev_reuse_factor = 0;
+    uint32_t prev_offs = 0;
 #endif
 
     struct encode_out_ctx out_ctx;
@@ -686,6 +692,9 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src, size_t src_le
             assert(src_pos < src_len);
             assert(out_ctx.dst_pos < out_ctx.dst_len);
             copy_u8(src, src_pos++, out_ctx.dst, out_ctx.dst_pos++);
+#ifdef ENABLE_STATS
+            st.literals += 1;
+#endif
         } else {
             write_bit(&out_ctx, 1);
             uint32_t factor_offs = (uint32_t)aux[0 + 5 * src_pos];
@@ -695,6 +704,23 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src, size_t src_le
             write_factor_offs(&out_ctx, factor_offs);
             write_factor_len(&out_ctx, factor_len);
             src_pos += factor_len;
+#ifdef ENABLE_STATS
+            st.factors += 1;
+
+            if (factor_offs == prev_offs) {
+                st.offset_hits += 1;
+
+                st.saved_bits += factor_offs_bitsize(factor_offs);
+                st.extra_bits += vnibble_bitsize(nr_factor - prev_reuse_factor);
+
+                prev_reuse_factor = nr_factor;
+                nr_factor += 1;
+            } else {
+                st.offset_misses += 1;
+            }
+
+            prev_offs = factor_offs;
+#endif
         }
     }
 

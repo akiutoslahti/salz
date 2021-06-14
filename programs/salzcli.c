@@ -150,6 +150,23 @@ static int compress_fname(char *in_fname, char *out_fname,
             1.0 * st->sa_time / NS_IN_SEC, 1.0 * st->psv_nsv_time / NS_IN_SEC,
             1.0 * st->factor_time / NS_IN_SEC, 1.0 * st->mincost_time / NS_IN_SEC,
             1.0 * st->encode_time / NS_IN_SEC);
+
+    fprintf(stderr, "    Literals: %zu, factors: %zu\n",
+            st->literals,
+            st->factors);
+
+    fprintf(stderr, "    Reuse last offset - cache miss: %zu, cache hit: %zu, "
+            "cache hit rate: %.3f\n",
+            st->offset_misses,
+            st->offset_hits,
+            1.0 * st->offset_hits / (st->offset_misses + st->offset_hits));
+
+    fprintf(stderr, "    Offs bits saved: %zu, extra bits needed: %zu, net "
+            "effect: %ld\n",
+            st->saved_bits,
+            st->extra_bits,
+            (int64_t)st->extra_bits - (int64_t)st->saved_bits);
+
 #endif
 
 exit:
