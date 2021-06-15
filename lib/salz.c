@@ -702,6 +702,13 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src, size_t src_le
 
 #ifdef ENABLE_STATS
     increment_clock(st.encode_time);
+
+    st.segments++;
+
+    if (out_ctx.dst_pos >= src_len) {
+        st.incompressible++;
+        st.wasted_bytes += (out_ctx.dst_pos - src_len);
+    }
 #endif
 
     return (uint32_t)out_ctx.dst_pos;

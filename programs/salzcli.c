@@ -150,6 +150,11 @@ static int compress_fname(char *in_fname, char *out_fname,
             1.0 * st->sa_time / NS_IN_SEC, 1.0 * st->psv_nsv_time / NS_IN_SEC,
             1.0 * st->factor_time / NS_IN_SEC, 1.0 * st->mincost_time / NS_IN_SEC,
             1.0 * st->encode_time / NS_IN_SEC);
+    fprintf(stderr, "    Incompressible segments: %zu, total segments: %zu, "
+            "wasted bytes: %zu\n",
+            st->incompressible,
+            st->segments,
+            st->wasted_bytes);
 #endif
 
 exit:
