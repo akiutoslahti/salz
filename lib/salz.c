@@ -34,6 +34,7 @@
 #define max(a, b) (((a) < (b)) ? (b) : (a))
 
 #define divup(a, b) (((a) + (b) - 1) / (b))
+#define roundup(a, b) (divup(a, b) * b)
 
 #define unused(var) ((void)var)
 
@@ -58,6 +59,12 @@
             time_ns = get_time_ns();        \
         } while (0)
 #endif
+
+
+static size_t read_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
+        uint32_t *res);
+static size_t write_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
+        uint32_t val);
 
 struct io_stream {
     uint8_t *buf;
@@ -114,33 +121,64 @@ static void cpy_factor(uint8_t *buf, size_t cpy_pos, size_t pos, size_t len)
         buf[pos++] = buf[cpy_pos++];
 }
 
-static void in_stream_init(struct io_stream *stream,
-        uint8_t *src, size_t src_len)
+static bool stream_empty(struct io_stream *stream)
 {
-    assert(field_sizeof(struct io_stream, bits) < src_len + 1);
-    stream->buf = src;
-    stream->buf_len = src_len;
+    return stream->buf_pos == stream->buf_len;
+}
+
+static size_t in_stream_init(struct io_stream *stream, uint8_t *src,
+        size_t src_len, size_t src_pos)
+{
+    size_t orig_pos = src_pos;
+
+    uint32_t stream_size;
+    src_pos += read_vbyte(src, src_len, src_pos, &stream_size);
+
+    assert(field_sizeof(struct io_stream, bits) < stream_size + 1);
+    stream->buf = &src[src_pos];
+    stream->buf_len = stream_size;
     stream->buf_pos = field_sizeof(struct io_stream, bits);
     stream->bits = read_u64(stream->buf, 0);
     stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
+
+    return (src_pos + stream_size) - orig_pos;
 }
 
-static void out_stream_init(struct io_stream *stream,
-        uint8_t *dst, size_t dst_len)
+static bool out_stream_init(struct io_stream *stream, size_t size)
 {
-    assert(field_sizeof(struct io_stream, bits) < dst_len + 1);
-    stream->buf = dst;
-    stream->buf_len = dst_len;
+    stream->buf = malloc(size);
+
+    if (!stream->buf)
+        return false;
+
+    assert(field_sizeof(struct io_stream, bits) < size + 1);
+    stream->buf_len = size;
     stream->buf_pos = field_sizeof(struct io_stream, bits);
     stream->bits = 0;
     stream->bits_pos = 0;
     stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
+
+    return true;
 }
 
-static void out_stream_fini(struct io_stream *stream)
+static size_t out_stream_fini(struct io_stream *stream, uint8_t *dst,
+        size_t dst_len, size_t dst_pos)
 {
+    size_t orig_pos = dst_pos;
+
     stream->bits <<= (stream->bits_avail);
     write_u64(stream->buf, stream->bits_pos, stream->bits);
+
+    if (dst) {
+        dst_pos += write_vbyte(dst, dst_len, dst_pos, stream->buf_pos);
+        assert(dst_pos + stream->buf_pos < dst_len + 1);
+        memcpy(&dst[dst_pos], stream->buf, stream->buf_pos);
+        dst_pos += stream->buf_pos;
+    }
+
+    free(stream->buf);
+
+    return dst_pos - orig_pos;
 }
 
 static void queue_bits(struct io_stream *stream)
@@ -478,6 +516,76 @@ static void write_vnibble(struct io_stream *stream, uint32_t val)
     write_bits(stream, nibbles, nibbles_len * 4);
 }
 
+static size_t read_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
+        uint32_t *res)
+{
+#ifdef NDEBUG
+    unused(buf_len);
+#endif
+
+    size_t orig_pos = pos;
+
+    assert(pos < buf_len);
+    uint8_t byte = buf[pos++];
+    *res = byte & 0x7fu;
+
+    while (byte < 0x80u) {
+        assert(pos < buf_len);
+        byte = buf[pos++];
+        *res = ((*res + 1) << 7) | (byte & 0x7fu);
+    }
+
+    return pos - orig_pos;
+}
+
+static size_t vbyte_size(uint32_t val)
+{
+    size_t vbyte_len = 1;
+
+    while (val >>= 7) {
+        val -= 1;
+        vbyte_len += 1;
+    }
+
+    return vbyte_len;
+}
+
+static size_t encode_vbyte(uint32_t val, uint64_t *res)
+{
+    size_t vbyte_len = 1;
+    *res = (val & 0x7fu) | 0x80u;
+
+    while (val >>= 7) {
+        val -= 1;
+        *res = (*res << 8) | (val & 0x7fu);
+        vbyte_len += 1;
+    }
+
+    return vbyte_len;
+}
+
+static size_t write_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
+        uint32_t val)
+{
+#ifdef NDEBUG
+    unused(buf_len);
+#endif
+
+    size_t orig_pos = pos;
+
+    uint64_t vbyte;
+    size_t vbyte_len = encode_vbyte(val, &vbyte);
+
+    assert(pos + vbyte_len < buf_len + 1);
+
+    while (vbyte_len--) {
+        buf[pos++] = vbyte & 0xffu;
+        vbyte >>= 8;
+    }
+
+    return pos - orig_pos;
+}
+
 static size_t factor_offs_bitsize(uint32_t val)
 {
     return 8 + vnibble_bitsize((val - 1) >> 8);
@@ -679,36 +787,65 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src, size_t src_le
     increment_clock(st.mincost_time);
 #endif
 
-    struct io_stream out_stream;
-    out_stream_init(&out_stream, dst, dst_len);
+    struct io_stream main;
+    struct io_stream ordinals;
+
+    size_t main_size_max = src_len + roundup(src_len, 64) / 8;
+    main_size_max += vbyte_size(main_size_max);
+    size_t ordinals_size_max = divup(src_len, 2);
+
+    if (!out_stream_init(&main, main_size_max))
+        return 0;
+
+    if (!out_stream_init(&ordinals, ordinals_size_max)) {
+        out_stream_fini(&ordinals, NULL, 0, 0);
+        return 0;
+    }
 
     size_t src_pos = 0;
+    uint32_t prev_offs = 0;
+    size_t ord = 0;
+    size_t prev_ord = 0;
     while (src_pos < src_len) {
         uint32_t factor_len = (uint32_t)aux[1 + 5 * src_pos];
 
         if (!factor_len) {
-            write_bit(&out_stream, 0);
+            write_bit(&main, 0);
             assert(src_pos < src_len);
-            cpy_u8_tos(&out_stream, src, src_pos++);
+            cpy_u8_tos(&main, src, src_pos++);
         } else {
-            write_bit(&out_stream, 1);
+            write_bit(&main, 1);
             uint32_t factor_offs = (uint32_t)aux[0 + 5 * src_pos];
 
             assert(factor_offs <= src_pos);
 
-            write_factor_offs(&out_stream, factor_offs);
-            write_factor_len(&out_stream, factor_len);
+            if (factor_offs == prev_offs) {
+                write_vnibble(&ordinals, (uint32_t)(ord - prev_ord));
+                prev_ord = ord;
+            } else {
+                write_factor_offs(&main, factor_offs);
+            }
+
+            write_factor_len(&main, factor_len);
             src_pos += factor_len;
+
+            prev_offs = factor_offs;
+            ord += 1;
         }
     }
 
-    out_stream_fini(&out_stream);
+    write_bit(&main, 0);
+    write_vnibble(&ordinals, (uint32_t)(ord - prev_ord));
+
+    size_t dst_pos = 0;
+    dst_pos += out_stream_fini(&main, dst, dst_len, dst_pos);
+    dst_pos += out_stream_fini(&ordinals, dst, dst_len, dst_pos);
 
 #ifdef ENABLE_STATS
     increment_clock(st.encode_time);
 #endif
 
-    return (uint32_t)out_stream.buf_pos;
+    return (uint32_t)dst_pos;
 }
 
 uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
@@ -718,23 +855,46 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     unused(dst_len);
 #endif
 
-    struct io_stream in_stream;
-    in_stream_init(&in_stream, src, src_len);
-
+    size_t src_pos = 0;
     size_t dst_pos = 0;
 
-    while (in_stream.buf_pos < in_stream.buf_len) {
-        if (!read_bit(&in_stream)) {
+    struct io_stream main;
+    struct io_stream ordinals;
+
+    src_pos += in_stream_init(&main, src, src_len, src_pos);
+    src_pos += in_stream_init(&ordinals, src, src_len, src_pos);
+
+    assert(src_pos == src_len);
+
+    size_t prev_offs = 0;
+    size_t ord = 0;
+    size_t next_ord = read_vnibble(&ordinals);
+    while (true) {
+        if (!read_bit(&main)) {
+            if (stream_empty(&main))
+                break;
+
             assert(dst_pos < dst_len);
-            cpy_u8_froms(&in_stream, dst, dst_pos++);
+            cpy_u8_froms(&main, dst, dst_pos++);
         } else {
-            uint32_t factor_offs = read_factor_offs(&in_stream);
-            uint32_t factor_len = read_factor_len(&in_stream);
+            uint32_t factor_offs;
+
+            if (ord == next_ord) {
+                factor_offs = prev_offs;
+                next_ord += read_vnibble(&ordinals);
+            } else {
+                factor_offs = read_factor_offs(&main);
+            }
+
+            uint32_t factor_len = read_factor_len(&main);
 
             assert(factor_offs <= dst_pos);
             assert(dst_pos + factor_len < dst_len + 1);
             cpy_factor(dst, dst_pos - factor_offs, dst_pos, factor_len);
             dst_pos += factor_len;
+
+            prev_offs = factor_offs;
+            ord += 1;
         }
     }
 
