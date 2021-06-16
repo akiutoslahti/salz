@@ -7,6 +7,7 @@
  * See file LICENSE or a copy at <https://opensource.org/licenses/MIT>.
  */
 
+#include <limits.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -183,7 +184,8 @@ static size_t out_stream_fini(struct io_stream *stream, uint8_t *dst,
 
 static void queue_bits(struct io_stream *stream)
 {
-    assert(stream->buf_pos + field_sizeof(struct io_stream, bits) < stream->buf_len + 1);
+    assert(stream->buf_pos + field_sizeof(struct io_stream, bits) <
+           stream->buf_len + 1);
     stream->bits = read_u64(stream->buf, stream->buf_pos);
     stream->buf_pos += field_sizeof(struct io_stream, bits);
     stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
@@ -244,7 +246,8 @@ static uint32_t read_unary(struct io_stream *stream)
 
 static void flush_bits(struct io_stream *stream)
 {
-    assert(stream->buf_pos + field_sizeof(struct io_stream, bits) < stream->buf_len + 1);
+    assert(stream->buf_pos + field_sizeof(struct io_stream, bits) <
+           stream->buf_len + 1);
     write_u64(stream->buf, stream->bits_pos, stream->bits);
     stream->bits = 0;
     stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
@@ -677,8 +680,8 @@ static void lz_factor(struct factor_ctx *ctx, uint8_t *text,
     ctx->nsv_len = nsv_len;
 }
 
-uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src, size_t src_len,
-        uint8_t *dst, size_t dst_len)
+uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
+        size_t src_len, uint8_t *dst, size_t dst_len)
 {
 #ifdef NDEBUG
     unused(dst_len);
@@ -727,60 +730,83 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src, size_t src_le
     struct factor_ctx fctx;
     init_factor_ctx(&fctx);
 
-    aux[1 + 5 * 0] = 0;
-    aux[3 + 5 * 0] = 0;
+    for (size_t i = 0; i < src_len + 1; i++) {
+        aux[2 + 5 * i] = INT_MAX; /* Costs */
+        aux[4 + 5 * i] = 0; /* Offsets */
+    }
+
+    aux[2 + 5 * 0] = 0; /* First position cost */
+    aux[2 + 5 * 1] = 9; /* Second position cost */
+    aux[3 + 5 * 1] = 0; /* Second position parent */
+
     for (size_t src_pos = 1; src_pos < src_len; src_pos++) {
         int32_t psv = aux[0 + 5 * src_pos];
         int32_t nsv = aux[1 + 5 * src_pos];
 
         lz_factor(&fctx, src, src_len, src_pos, psv, nsv);
 
-        aux[0 + 5 * src_pos] = (int32_t)(src_pos - fctx.psv);
-        aux[1 + 5 * src_pos] = (int32_t)fctx.psv_len;
-        aux[2 + 5 * src_pos] = (int32_t)(src_pos - fctx.nsv);
-        aux[3 + 5 * src_pos] = (int32_t)fctx.nsv_len;
+        int32_t base_cost = aux[2 + 5 * src_pos];
+        int32_t prev_offs = aux[4 + 5 * src_pos];
+
+        int32_t literal_cost = 9 + base_cost;
+        if (literal_cost < aux[2 + 5 * (src_pos + 1)]) {
+            aux[2 + 5 * (src_pos + 1)] = literal_cost;
+            aux[3 + 5 * (src_pos + 1)] = src_pos;
+            aux[4 + 5 * (src_pos + 1)] = prev_offs;
+        }
+
+        int32_t psv_len = (int32_t)fctx.psv_len;
+        if (psv_len >= 3) {
+            int32_t psv_offs = (int32_t)(src_pos - fctx.psv);
+            int32_t psv_cost = 1 + factor_offs_bitsize(psv_offs) +
+                               factor_len_bitsize(psv_len) +
+                               base_cost;
+
+            if (psv_offs == prev_offs)
+                psv_cost -= factor_offs_bitsize(psv_offs);
+
+            if (psv_cost < aux[2 + 5 * (src_pos + psv_len)]) {
+                aux[2 + 5 * (src_pos + psv_len)] = psv_cost;
+                aux[3 + 5 * (src_pos + psv_len)] = src_pos;
+                aux[4 + 5 * (src_pos + psv_len)] = psv_offs;
+            }
+        }
+
+        int32_t nsv_len = (int32_t)fctx.nsv_len;
+        if (nsv_len >= 3) {
+            int32_t nsv_offs = (int32_t)(src_pos - fctx.nsv);
+            int32_t nsv_cost = 1 + factor_offs_bitsize(nsv_offs) +
+                               factor_len_bitsize(nsv_len) +
+                               base_cost;
+
+            if (nsv_offs == prev_offs)
+                nsv_cost -= factor_offs_bitsize(nsv_offs);
+
+            if (nsv_cost < aux[2 + 5 * (src_pos + nsv_len)]) {
+                aux[2 + 5 * (src_pos + nsv_len)] = nsv_cost;
+                aux[3 + 5 * (src_pos + nsv_len)] = src_pos;
+                aux[4 + 5 * (src_pos + nsv_len)] = nsv_offs;
+            }
+        }
     }
 
 #ifdef ENABLE_STATS
     increment_clock(st.factor_time);
 #endif
 
-    aux[4 + 5 * src_len] = 0;
-    for (size_t src_pos = src_len - 1; src_pos; src_pos--) {
-        int32_t lcost = 9 + aux[4 + 5 * (src_pos + 1)];
+    for (size_t src_pos = src_len; src_pos > 0; ) {
+        int32_t prev_pos = aux[3 + 5 * src_pos];
+        int32_t factor_len = src_pos - prev_pos;
 
-        int32_t offs1 = aux[0 + 5 * src_pos];
-        int32_t len1 = aux[1 + 5 * src_pos];
-        int32_t cost1 = lcost + 1;
-
-        if (len1 >= 3)
-            cost1 = 1 + factor_offs_bitsize(offs1) +
-                    factor_len_bitsize(len1) +
-                    aux[4 + 5 * (src_pos + len1)];
-
-        int32_t offs2 = aux[2 + 5 * src_pos];
-        int32_t len2 = aux[3 + 5 * src_pos];
-        int32_t cost2 = lcost + 1;
-
-        if (len2 >= 3)
-            cost2 = 1 + factor_offs_bitsize(offs2) +
-                    factor_len_bitsize(len2) +
-                    aux[4 + 5 * (src_pos + len2)];
-
-        int32_t mincost = min(lcost, min(cost1, cost2));
-
-        if (lcost == mincost) {
-            aux[1 + 5 * src_pos] = 0;
-            aux[4 + 5 * src_pos] = lcost;
-        } else if (cost1 == mincost) {
-            aux[0 + 5 * src_pos] = offs1;
-            aux[1 + 5 * src_pos] = len1;
-            aux[4 + 5 * src_pos] = cost1;
+        if (factor_len == 1) {
+            aux[0 + 5 * prev_pos] = 0;
+            aux[1 + 5 * prev_pos] = 0;
         } else {
-            aux[0 + 5 * src_pos] = offs2;
-            aux[1 + 5 * src_pos] = len2;
-            aux[4 + 5 * src_pos] = cost2;
+            aux[0 + 5 * prev_pos] = aux[4 + 5 * src_pos];
+            aux[1 + 5 * prev_pos] = factor_len;
         }
+
+        src_pos = prev_pos;
     }
 
 #ifdef ENABLE_STATS
