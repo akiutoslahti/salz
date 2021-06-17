@@ -22,6 +22,9 @@ struct stats {
     uint64_t factor_time;
     uint64_t mincost_time;
     uint64_t encode_time;
+
+    size_t ord_vnibble_bits;
+    size_t ord_ef_bits;
 };
 
 extern struct stats *get_stats(void);

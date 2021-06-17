@@ -44,6 +44,8 @@
 #define field_sizeof(t, f) (sizeof(((t*)0)->f))
 
 #ifdef ENABLE_STATS
+#   include <math.h>
+
     struct stats st;
 
     struct stats *get_stats(void)
@@ -846,6 +848,9 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     uint32_t prev_offs = 0;
     size_t ord = 0;
     size_t prev_ord = 0;
+#ifdef ENABLE_STATS
+    size_t nr_ords = 0;
+#endif
     while (src_pos < src_len) {
         uint32_t factor_len = (uint32_t)aux[1 + 5 * src_pos];
 
@@ -861,6 +866,10 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
 
             if (factor_offs == prev_offs) {
                 write_vnibble(&ordinals, (uint32_t)(ord - prev_ord));
+#ifdef ENABLE_STATS
+                st.ord_vnibble_bits += vnibble_bitsize(ord - prev_ord);
+                nr_ords += 1;
+#endif
                 prev_ord = ord;
             } else {
                 write_factor_offs(&main, factor_offs);
@@ -882,6 +891,13 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
 
     write_bit(&main, 0);
     write_vnibble(&ordinals, (uint32_t)(ord - prev_ord));
+#ifdef ENABLE_STATS
+    st.ord_vnibble_bits += vnibble_bitsize(ord - prev_ord);
+
+    size_t ef_z = ord + 1;
+    size_t ef_n = nr_ords;
+    st.ord_ef_bits += (ef_n * (2 + (size_t)ceil(log2(1.0 * ef_z / ef_n))));
+#endif
 
     size_t dst_pos = 0;
     dst_pos += out_stream_fini(&main, dst, dst_len, dst_pos);
