@@ -127,6 +127,11 @@ static bool stream_empty(struct io_stream *stream)
     return stream->buf_pos == stream->buf_len;
 }
 
+static size_t stream_len(struct io_stream *stream)
+{
+    return stream->buf_pos;
+}
+
 static size_t in_stream_init(struct io_stream *stream, uint8_t *src,
         size_t src_len, size_t src_pos)
 {
@@ -160,6 +165,15 @@ static bool out_stream_init(struct io_stream *stream, size_t size)
     stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
 
     return true;
+}
+
+static void out_stream_reset(struct io_stream *stream)
+{
+    assert(field_sizeof(struct io_stream, bits) < stream->buf_len + 1);
+    stream->buf_pos = field_sizeof(struct io_stream, bits);
+    stream->bits = 0;
+    stream->bits_pos = 0;
+    stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
 }
 
 static size_t out_stream_fini(struct io_stream *stream, uint8_t *dst,
@@ -860,12 +874,26 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
         }
     }
 
+    if (stream_len(&main) + stream_len(&ordinals) >= src_len + 18) {
+        out_stream_reset(&main);
+        out_stream_reset(&ordinals);
+        src_pos = 0;
+    }
+
     write_bit(&main, 0);
     write_vnibble(&ordinals, (uint32_t)(ord - prev_ord));
 
     size_t dst_pos = 0;
     dst_pos += out_stream_fini(&main, dst, dst_len, dst_pos);
     dst_pos += out_stream_fini(&ordinals, dst, dst_len, dst_pos);
+
+    if (src_pos < src_len) {
+        size_t copy_len = src_len - src_pos;
+        assert(dst_pos + copy_len < dst_len + 1);
+        memcpy(&dst[dst_pos], &src[src_pos], copy_len);
+        src_pos += copy_len;
+        dst_pos += copy_len;
+    }
 
 #ifdef ENABLE_STATS
     increment_clock(st.encode_time);
@@ -889,8 +917,6 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
     src_pos += in_stream_init(&main, src, src_len, src_pos);
     src_pos += in_stream_init(&ordinals, src, src_len, src_pos);
-
-    assert(src_pos == src_len);
 
     size_t prev_offs = 0;
     size_t ord = 0;
@@ -922,6 +948,14 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
             prev_offs = factor_offs;
             ord += 1;
         }
+    }
+
+    if (src_pos < src_len) {
+        size_t copy_len = src_len - src_pos;
+        assert(dst_pos + copy_len < dst_len + 1);
+        memcpy(&dst[dst_pos], &src[src_pos], copy_len);
+        src_pos += copy_len;
+        dst_pos += copy_len;
     }
 
     return (uint32_t)dst_pos;
