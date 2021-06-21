@@ -61,7 +61,6 @@
         } while (0)
 #endif
 
-
 static size_t read_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
         uint32_t *res);
 static size_t write_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
@@ -210,7 +209,7 @@ static uint8_t read_bit(struct io_stream *stream)
     if (!stream->bits_avail)
         queue_bits(stream);
 
-    uint8_t ret = (stream->bits & 0x8000000000000000u) ? 1 : 0;
+    uint8_t ret = !!(stream->bits & 0x8000000000000000u);
     stream->bits <<= 1;
     stream->bits_avail -= 1;
 
@@ -269,12 +268,12 @@ static void flush_bits(struct io_stream *stream)
     stream->buf_pos += field_sizeof(struct io_stream, bits);
 }
 
-static void write_bit(struct io_stream *stream, uint8_t flag)
+static void write_bit(struct io_stream *stream, uint8_t bit)
 {
     if (!stream->bits_avail)
         flush_bits(stream);
 
-    stream->bits = (stream->bits << 1) | flag;
+    stream->bits = (stream->bits << 1) | bit;
     stream->bits_avail -= 1;
 }
 
@@ -285,8 +284,8 @@ static void write_bits(struct io_stream *stream, uint64_t bits, size_t count)
 
     if (count > stream->bits_avail) {
         stream->bits = (stream->bits << stream->bits_avail) |
-                    ((bits >> (count - stream->bits_avail)) &
-                     ((1u << stream->bits_avail) - 1));
+                       ((bits >> (count - stream->bits_avail)) &
+                        ((1u << stream->bits_avail) - 1));
         count -= stream->bits_avail;
 
         flush_bits(stream);
@@ -616,8 +615,7 @@ static void write_factor_offs(struct io_stream *stream, uint32_t val)
 
 static uint32_t read_factor_offs(struct io_stream *stream)
 {
-    return ((read_vnibble(stream) << 8) |
-            read_u8(stream)) + 1;
+    return ((read_vnibble(stream) << 8) | read_u8(stream)) + 1;
 }
 
 static size_t factor_len_bitsize(uint32_t val)
@@ -679,12 +677,12 @@ static void lz_factor(struct factor_ctx *ctx, uint8_t *text,
     size_t nsv_len = 0;
 
     if (psv != -1) {
-        size_t common_len = ctx->psv_len ? ctx->psv_len - 1 : 0;
+        size_t common_len = ctx->psv_len + !ctx->psv_len - 1;
         psv_len = lcp_cmp(text, text_len, common_len, psv, pos);
     }
 
     if (nsv != -1) {
-        size_t common_len = ctx->nsv_len ? ctx->nsv_len - 1 : 0;
+        size_t common_len = ctx->nsv_len + !ctx->nsv_len - 1;
         nsv_len = lcp_cmp(text, text_len, common_len, nsv, pos);
     }
 
@@ -773,11 +771,9 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
         if (psv_len >= 3) {
             int32_t psv_offs = (int32_t)(src_pos - fctx.psv);
             int32_t psv_cost = 1 + factor_offs_bitsize(psv_offs) +
-                               factor_len_bitsize(psv_len) +
+                               ((psv_offs != prev_offs) *
+                                factor_len_bitsize(psv_len)) +
                                base_cost;
-
-            if (psv_offs == prev_offs)
-                psv_cost -= factor_offs_bitsize(psv_offs);
 
             if (psv_cost < aux[2 + 5 * (src_pos + psv_len)]) {
                 aux[2 + 5 * (src_pos + psv_len)] = psv_cost;
@@ -790,11 +786,9 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
         if (nsv_len >= 3) {
             int32_t nsv_offs = (int32_t)(src_pos - fctx.nsv);
             int32_t nsv_cost = 1 + factor_offs_bitsize(nsv_offs) +
-                               factor_len_bitsize(nsv_len) +
+                               ((nsv_offs != prev_offs) *
+                                factor_len_bitsize(nsv_len)) +
                                base_cost;
-
-            if (nsv_offs == prev_offs)
-                nsv_cost -= factor_offs_bitsize(nsv_offs);
 
             if (nsv_cost < aux[2 + 5 * (src_pos + nsv_len)]) {
                 aux[2 + 5 * (src_pos + nsv_len)] = nsv_cost;
@@ -810,15 +804,11 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
 
     for (size_t src_pos = src_len; src_pos > 0; ) {
         int32_t prev_pos = aux[3 + 5 * src_pos];
+        int32_t prev_offs = aux[4 + 5 * src_pos];
         int32_t factor_len = src_pos - prev_pos;
 
-        if (factor_len == 1) {
-            aux[0 + 5 * prev_pos] = 0;
-            aux[1 + 5 * prev_pos] = 0;
-        } else {
-            aux[0 + 5 * prev_pos] = aux[4 + 5 * src_pos];
-            aux[1 + 5 * prev_pos] = factor_len;
-        }
+        aux[0 + 5 * prev_pos] = (factor_len != 1) * prev_offs;
+        aux[1 + 5 * prev_pos] = (factor_len != 1) * factor_len;
 
         src_pos = prev_pos;
     }
