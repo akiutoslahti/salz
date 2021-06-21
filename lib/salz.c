@@ -237,6 +237,23 @@ static uint64_t read_bits(struct io_stream *stream, size_t count)
     return ret;
 }
 
+static uint8_t read_nibble(struct io_stream *stream)
+{
+    uint8_t ret = 0;
+
+    if (!stream->bits_avail)
+        queue_bits(stream);
+
+    if (stream->bits_avail < 4)
+        return (uint8_t)read_bits(stream, 4);
+
+    ret = stream->bits >> 60;
+    stream->bits <<= 4;
+    stream->bits_avail -= 4;
+
+    return ret;
+}
+
 static uint32_t read_unary(struct io_stream *stream)
 {
     if (!stream->bits_avail)
@@ -372,58 +389,58 @@ static size_t vnibble_bitsize(uint32_t val)
 
 static uint32_t read_vnibble(struct io_stream *stream)
 {
-    uint8_t nibble = read_bits(stream, 4);
+    uint8_t nibble = read_nibble(stream);
     uint32_t ret = nibble & 0x7u;
 
     if (nibble >= 0x8u)
         return ret;
 
-    nibble = read_bits(stream, 4);
+    nibble = read_nibble(stream);
     ret = ((ret + 1) << 3) | (nibble & 0x7u);
     if (nibble >= 0x8u)
         return ret;
 
-    nibble = read_bits(stream, 4);
+    nibble = read_nibble(stream);
     ret = ((ret + 1) << 3) | (nibble & 0x7u);
     if (nibble >= 0x8u)
         return ret;
 
-    nibble = read_bits(stream, 4);
+    nibble = read_nibble(stream);
     ret = ((ret + 1) << 3) | (nibble & 0x7u);
     if (nibble >= 0x8u)
         return ret;
 
-    nibble = read_bits(stream, 4);
+    nibble = read_nibble(stream);
     ret = ((ret + 1) << 3) | (nibble & 0x7u);
     if (nibble >= 0x8u)
         return ret;
 
-    nibble = read_bits(stream, 4);
+    nibble = read_nibble(stream);
     ret = ((ret + 1) << 3) | (nibble & 0x7u);
     if (nibble >= 0x8u)
         return ret;
 
-    nibble = read_bits(stream, 4);
+    nibble = read_nibble(stream);
     ret = ((ret + 1) << 3) | (nibble & 0x7u);
     if (nibble >= 0x8u)
         return ret;
 
-    nibble = read_bits(stream, 4);
+    nibble = read_nibble(stream);
     ret = ((ret + 1) << 3) | (nibble & 0x7u);
     if (nibble >= 0x8u)
         return ret;
 
-    nibble = read_bits(stream, 4);
+    nibble = read_nibble(stream);
     ret = ((ret + 1) << 3) | (nibble & 0x7u);
     if (nibble >= 0x8u)
         return ret;
 
-    nibble = read_bits(stream, 4);
+    nibble = read_nibble(stream);
     ret = ((ret + 1) << 3) | (nibble & 0x7u);
     if (nibble >= 0x8u)
         return ret;
 
-    nibble = read_bits(stream, 4);
+    nibble = read_nibble(stream);
     ret = ((ret + 1) << 3) | (nibble & 0x7u);
     return ret;
 }
