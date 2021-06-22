@@ -488,32 +488,26 @@ void encode_ctx_init(struct encode_ctx **ctx_out, size_t src_len)
     if (!ctx)
         return;
 
-    ctx->aux1_len = 3 * (src_len + 1);
-    ctx->aux2_len = 2 * (src_len + 1);
+    ctx->aux1_len = 1 * (src_len + 2);
+    ctx->aux2_len = 4 * (src_len + 1);
 
     ctx->aux1 = malloc(ctx->aux1_len * sizeof(*(ctx->aux1)));
     ctx->aux2 = malloc(ctx->aux2_len * sizeof(*(ctx->aux2)));
 
     if (!ctx->aux1 || !ctx->aux2)
-        goto fail_b;
+        goto fail;
 
     size_t main_size_max = src_len + roundup(src_len, 64) / 8;
     main_size_max += vbyte_size(main_size_max);
-    size_t ordinals_size_max = divup(src_len, 2);
 
     if (!out_stream_alloc(&(ctx->main), main_size_max))
-        goto fail_b;
-
-    if (!out_stream_alloc(&(ctx->ordinals), ordinals_size_max))
-        goto fail_a;
+        goto fail;
 
     *ctx_out = ctx;
 
     return;
 
-fail_a:
-    out_stream_free(&(ctx->main));
-fail_b:
+fail:
     debug("Resource allocation failed");
     free(ctx->aux1);
     free(ctx->aux2);
@@ -524,7 +518,6 @@ void encode_ctx_fini(struct encode_ctx **ctx)
     free((*ctx)->aux1);
     free((*ctx)->aux2);
     out_stream_free(&((*ctx)->main));
-    out_stream_free(&((*ctx)->ordinals));
     free(*ctx);
     *ctx = NULL;
 }
@@ -635,18 +628,15 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
 
     if (ctx->aux1 == NULL ||
         ctx->aux2 == NULL ||
-        ctx->aux1_len < 3 * (src_len + 1) ||
-        ctx->aux2_len < 2 * (src_len + 1) ||
-        ctx->main.buf == NULL ||
-        ctx->ordinals.buf == NULL) {
+        ctx->aux1_len < 1 * (src_len + 2) ||
+        ctx->aux2_len < 4 * (src_len + 1) ||
+        ctx->main.buf == NULL) {
         debug("Allocated resources are not enough");
         return 0;
     }
 
     int32_t *sa = ctx->aux1;
-    int32_t *psv_nsv = ctx->aux2;
-    int32_t *mincost = ctx->aux1;
-    int32_t *factors = ctx->aux2;
+    int32_t *aux = ctx->aux2;
 
 #ifdef ENABLE_STATS
     start_clock();
@@ -665,8 +655,8 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     sa[src_len + 1] = -1;
     for (size_t top = 0, i = 1; i < src_len + 2; i++) {
         while (sa[top] > sa[i]) {
-            psv_nsv[0 + 2 * sa[top]] = sa[top - 1]; /* PSV */
-            psv_nsv[1 + 2 * sa[top]] = sa[i];       /* NSV */
+            aux[0 + 4 * sa[top]] = sa[top - 1]; /* PSV */
+            aux[1 + 4 * sa[top]] = sa[i];       /* NSV */
             top -= 1;
         }
         top += 1;
@@ -680,75 +670,61 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     struct factor_ctx fctx;
     init_factor_ctx(&fctx);
 
-    for (size_t i = 0; i < src_len + 1; i++) {
-        mincost[0 + 3 * i] = INT_MAX; /* Costs */
-        mincost[2 + 3 * i] = 0;       /* Offsets */
-    }
-
-    mincost[0 + 3 * 0] = 0; /* First position cost */
-    mincost[0 + 3 * 1] = 9; /* Second position cost */
-    mincost[1 + 3 * 1] = 0; /* Second position parent */
-
+    aux[1 + 4 * 0] = 0; /* First position must be a literal */
+    aux[3 + 4 * 0] = 0; /* First position must be a literal */
     for (size_t src_pos = 1; src_pos < src_len; src_pos++) {
-        int32_t psv = psv_nsv[0 + 2 * src_pos];
-        int32_t nsv = psv_nsv[1 + 2 * src_pos];
+        int32_t psv = aux[0 + 4 * src_pos];
+        int32_t nsv = aux[1 + 4 * src_pos];
 
         lz_factor(&fctx, src, src_len, src_pos, psv, nsv);
 
-        int32_t base_cost = mincost[0 + 3 * src_pos];
-        int32_t prev_offs = mincost[2 + 3 * src_pos];
-
-        int32_t literal_cost = 9 + base_cost;
-        if (literal_cost < mincost[0 + 3 * (src_pos + 1)]) {
-            mincost[0 + 3 * (src_pos + 1)] = literal_cost;
-            mincost[1 + 3 * (src_pos + 1)] = src_pos;
-            mincost[2 + 3 * (src_pos + 1)] = prev_offs;
-        }
-
-        int32_t psv_len = (int32_t)fctx.psv_len;
-        if (psv_len >= min_factor_len) {
-            int32_t psv_offs = (int32_t)(src_pos - fctx.psv);
-            int32_t psv_cost = 1 + factor_offs_bitsize(psv_offs) +
-                               ((psv_offs != prev_offs) *
-                                factor_len_bitsize(psv_len)) +
-                               base_cost;
-
-            if (psv_cost < mincost[0 + 3 * (src_pos + psv_len)]) {
-                mincost[0 + 3 * (src_pos + psv_len)] = psv_cost;
-                mincost[1 + 3 * (src_pos + psv_len)] = src_pos;
-                mincost[2 + 3 * (src_pos + psv_len)] = psv_offs;
-            }
-        }
-
-        int32_t nsv_len = (int32_t)fctx.nsv_len;
-        if (nsv_len >= min_factor_len) {
-            int32_t nsv_offs = (int32_t)(src_pos - fctx.nsv);
-            int32_t nsv_cost = 1 + factor_offs_bitsize(nsv_offs) +
-                               ((nsv_offs != prev_offs) *
-                                factor_len_bitsize(nsv_len)) +
-                               base_cost;
-
-            if (nsv_cost < mincost[0 + 3 * (src_pos + nsv_len)]) {
-                mincost[0 + 3 * (src_pos + nsv_len)] = nsv_cost;
-                mincost[1 + 3 * (src_pos + nsv_len)] = src_pos;
-                mincost[2 + 3 * (src_pos + nsv_len)] = nsv_offs;
-            }
-        }
+        aux[0 + 4 * src_pos] = (int32_t)(src_pos - fctx.psv);
+        aux[1 + 4 * src_pos] = (int32_t)fctx.psv_len;
+        aux[2 + 4 * src_pos] = (int32_t)(src_pos - fctx.nsv);
+        aux[3 + 4 * src_pos] = (int32_t)fctx.nsv_len;
     }
 
 #ifdef ENABLE_STATS
     increment_clock(st.factor_time);
 #endif
 
-    for (size_t src_pos = src_len; src_pos > 0; ) {
-        int32_t prev_pos = mincost[1 + 3 * src_pos];
-        int32_t prev_offs = mincost[2 + 3 * src_pos];
-        int32_t factor_len = src_pos - prev_pos;
+    aux[2 + 4 * src_len] = 0;
+    for (size_t src_pos = src_len - 1; src_pos; src_pos--) {
+        int32_t factor_offs = 0;
+        int32_t factor_len = 0;
+        int32_t cost = 9 + aux[2 + 4 * (src_pos + 1)];
 
-        factors[0 + 2 * prev_pos] = (factor_len != 1) * prev_offs;
-        factors[1 + 2 * prev_pos] = (factor_len != 1) * factor_len;
+        int32_t len1 = aux[1 + 4 * src_pos];
+        if (len1 >= min_factor_len) {
+            int32_t offs1 = aux[0 + 4 * src_pos];
+            int32_t cost1 = 1 + factor_offs_bitsize(offs1) +
+                            factor_len_bitsize(len1) +
+                            aux[2 + 4 * (src_pos + len1)];
 
-        src_pos = prev_pos;
+            if (cost1 < cost) {
+                cost = cost1;
+                factor_offs = offs1;
+                factor_len = len1;
+            }
+        }
+
+        int32_t len2 = aux[3 + 4 * src_pos];
+        if (len2 >= min_factor_len) {
+            int32_t offs2 = aux[2 + 4 * src_pos];
+            int32_t cost2 = 1 + factor_offs_bitsize(offs2) +
+                            factor_len_bitsize(len2) +
+                            aux[2 + 4 * (src_pos + len2)];
+
+            if (cost2 < cost) {
+                cost = cost2;
+                factor_offs = offs2;
+                factor_len = len2;
+            }
+        }
+
+        aux[0 + 4 * src_pos] = factor_offs;
+        aux[1 + 4 * src_pos] = factor_len;
+        aux[2 + 4 * src_pos] = cost;
     }
 
 #ifdef ENABLE_STATS
@@ -756,40 +732,22 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
 #endif
 
     struct io_stream *main = &ctx->main;
-    struct io_stream *ordinals = &ctx->ordinals;
-
     out_stream_init(main);
-    out_stream_init(ordinals);
 
     size_t src_pos = 0;
-    uint32_t prev_offs = 0;
-    size_t ord = 0;
-    size_t prev_ord = 0;
     while (src_pos < src_len) {
-        uint32_t factor_len = (uint32_t)factors[1 + 2 * src_pos];
-
+        uint32_t factor_len = (uint32_t)aux[1 + 4 * src_pos];
         if (!factor_len) {
             write_bit(main, 0);
             assert(src_pos < src_len);
             cpy_u8_tos(main, src, src_pos++);
         } else {
             write_bit(main, 1);
-            uint32_t factor_offs = (uint32_t)factors[0 + 2 * src_pos];
-
+            uint32_t factor_offs = (uint32_t)aux[0 + 4 * src_pos];
             assert(factor_offs <= src_pos);
-
-            if (factor_offs == prev_offs) {
-                write_vnibble(ordinals, (uint32_t)(ord - prev_ord));
-                prev_ord = ord;
-            } else {
-                write_factor_offs(main, factor_offs);
-            }
-
+            write_factor_offs(main, factor_offs);
             write_factor_len(main, factor_len);
             src_pos += factor_len;
-
-            prev_offs = factor_offs;
-            ord += 1;
         }
     }
 
@@ -800,17 +758,13 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
         cpy_u8_tos(main, src, src_pos++);
     }
 
-    if (stream_len(main) + stream_len(ordinals) >= src_len + 18) {
+    if (stream_len(main) >= src_len + 9) {
         out_stream_init(main);
-        out_stream_init(ordinals);
         src_pos = 0;
     }
 
-    write_vnibble(ordinals, (uint32_t)(ord - prev_ord));
-
     size_t dst_pos = 0;
     dst_pos += out_stream_fini(main, dst, dst_len, dst_pos);
-    dst_pos += out_stream_fini(ordinals, dst, dst_len, dst_pos);
 
     if (src_pos < src_len) {
         size_t copy_len = src_len - src_pos;
@@ -838,37 +792,20 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     size_t dst_pos = 0;
 
     struct io_stream main;
-    struct io_stream ordinals;
 
     src_pos += in_stream_init(&main, src, src_len, src_pos);
-    src_pos += in_stream_init(&ordinals, src, src_len, src_pos);
 
-    size_t prev_offs = 0;
-    size_t ord = 0;
-    size_t next_ord = read_vnibble(&ordinals);
     while (!stream_empty(&main)) {
         if (!read_bit(&main)) {
             assert(dst_pos < dst_len);
             cpy_u8_froms(&main, dst, dst_pos++);
         } else {
-            uint32_t factor_offs;
-
-            if (ord == next_ord) {
-                factor_offs = prev_offs;
-                next_ord += read_vnibble(&ordinals);
-            } else {
-                factor_offs = read_factor_offs(&main);
-            }
-
+            uint32_t factor_offs = read_factor_offs(&main);
             uint32_t factor_len = read_factor_len(&main);
-
             assert(factor_offs <= dst_pos);
             assert(dst_pos + factor_len < dst_len + 1);
             cpy_factor(dst, dst_pos, factor_offs, factor_len);
             dst_pos += factor_len;
-
-            prev_offs = factor_offs;
-            ord += 1;
         }
     }
 
