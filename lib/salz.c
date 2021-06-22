@@ -302,11 +302,6 @@ static void write_unary(struct io_stream *stream, uint32_t val)
     write_bit(stream, 1);
 }
 
-static size_t gr3_bitsize(uint32_t val)
-{
-    return (val >> 3) + 1 + 3;
-}
-
 static uint32_t read_gr3(struct io_stream *stream)
 {
     return (read_unary(stream) << 3) | read_bits(stream, 3);
@@ -316,11 +311,6 @@ static void write_gr3(struct io_stream *stream, uint32_t val)
 {
     write_unary(stream, val >> 3);
     write_bits(stream, val & ((1u << 3) - 1), 3);
-}
-
-static size_t vnibble_bitsize(uint32_t val)
-{
-    return 4 * vnibble_size(val);
 }
 
 static uint8_t read_nibble(struct io_stream *stream)
@@ -488,8 +478,8 @@ void encode_ctx_init(struct encode_ctx **ctx_out, size_t src_len)
     if (!ctx)
         return;
 
-    ctx->aux1_len = 1 * (src_len + 2);
-    ctx->aux2_len = 4 * (src_len + 1);
+    ctx->aux1_len = src_len + 2;
+    ctx->aux2_len = 2 * (src_len + 1);
 
     ctx->aux1 = malloc(ctx->aux1_len * sizeof(*(ctx->aux1)));
     ctx->aux2 = malloc(ctx->aux2_len * sizeof(*(ctx->aux2)));
@@ -525,9 +515,9 @@ void encode_ctx_fini(struct encode_ctx **ctx)
 #define min_factor_offs 1
 #define min_factor_len 3
 
-static size_t factor_offs_bitsize(uint32_t val)
+static size_t factor_offs_bytesize(uint32_t val)
 {
-    return 8 + vnibble_bitsize((val - min_factor_offs) >> 8);
+    return divup(8 + 4 * vnibble_size((val - min_factor_offs) >> 8), 8);
 }
 
 static uint32_t read_factor_offs(struct io_stream *stream)
@@ -539,11 +529,6 @@ static void write_factor_offs(struct io_stream *stream, uint32_t val)
 {
     write_vnibble(stream, (val - min_factor_offs) >> 8);
     write_u8(stream, (val - min_factor_offs) & 0xffu);
-}
-
-static size_t factor_len_bitsize(uint32_t val)
-{
-    return gr3_bitsize(val - min_factor_len);
 }
 
 static uint32_t read_factor_len(struct io_stream *stream)
@@ -599,15 +584,11 @@ static void lz_factor(struct factor_ctx *ctx, uint8_t *text,
     size_t psv_len = 0;
     size_t nsv_len = 0;
 
-    if (psv != -1) {
-        size_t common_len = ctx->psv_len + !ctx->psv_len - 1;
-        psv_len = lcp_cmp(text, text_len, common_len, psv, pos);
-    }
+    if (psv != -1)
+        psv_len = lcp_cmp(text, text_len, 0, psv, pos);
 
-    if (nsv != -1) {
-        size_t common_len = ctx->nsv_len + !ctx->nsv_len - 1;
-        nsv_len = lcp_cmp(text, text_len, common_len, nsv, pos);
-    }
+    if (nsv != -1)
+        nsv_len = lcp_cmp(text, text_len, 0, nsv, pos);
 
     ctx->psv = psv;
     ctx->psv_len = psv_len;
@@ -628,15 +609,15 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
 
     if (ctx->aux1 == NULL ||
         ctx->aux2 == NULL ||
-        ctx->aux1_len < 1 * (src_len + 2) ||
-        ctx->aux2_len < 4 * (src_len + 1) ||
+        ctx->aux1_len < src_len + 2 ||
+        ctx->aux2_len < 2 * (src_len + 1) ||
         ctx->main.buf == NULL) {
         debug("Allocated resources are not enough");
         return 0;
     }
 
     int32_t *sa = ctx->aux1;
-    int32_t *aux = ctx->aux2;
+    int32_t *psv_nsv = ctx->aux2;
 
 #ifdef ENABLE_STATS
     start_clock();
@@ -655,8 +636,8 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     sa[src_len + 1] = -1;
     for (size_t top = 0, i = 1; i < src_len + 2; i++) {
         while (sa[top] > sa[i]) {
-            aux[0 + 4 * sa[top]] = sa[top - 1]; /* PSV */
-            aux[1 + 4 * sa[top]] = sa[i];       /* NSV */
+            psv_nsv[0 + 2 * sa[top]] = sa[top - 1]; /* PSV */
+            psv_nsv[1 + 2 * sa[top]] = sa[i];       /* NSV */
             top -= 1;
         }
         top += 1;
@@ -667,83 +648,42 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     increment_clock(st.psv_nsv_time);
 #endif
 
-    struct factor_ctx fctx;
-    init_factor_ctx(&fctx);
-
-    aux[1 + 4 * 0] = 0; /* First position must be a literal */
-    aux[3 + 4 * 0] = 0; /* First position must be a literal */
-    for (size_t src_pos = 1; src_pos < src_len; src_pos++) {
-        int32_t psv = aux[0 + 4 * src_pos];
-        int32_t nsv = aux[1 + 4 * src_pos];
-
-        lz_factor(&fctx, src, src_len, src_pos, psv, nsv);
-
-        aux[0 + 4 * src_pos] = (int32_t)(src_pos - fctx.psv);
-        aux[1 + 4 * src_pos] = (int32_t)fctx.psv_len;
-        aux[2 + 4 * src_pos] = (int32_t)(src_pos - fctx.nsv);
-        aux[3 + 4 * src_pos] = (int32_t)fctx.nsv_len;
-    }
-
-#ifdef ENABLE_STATS
-    increment_clock(st.factor_time);
-#endif
-
-    aux[2 + 4 * src_len] = 0;
-    for (size_t src_pos = src_len - 1; src_pos; src_pos--) {
-        int32_t factor_offs = 0;
-        int32_t factor_len = 0;
-        int32_t cost = 9 + aux[2 + 4 * (src_pos + 1)];
-
-        int32_t len1 = aux[1 + 4 * src_pos];
-        if (len1 >= min_factor_len) {
-            int32_t offs1 = aux[0 + 4 * src_pos];
-            int32_t cost1 = 1 + factor_offs_bitsize(offs1) +
-                            factor_len_bitsize(len1) +
-                            aux[2 + 4 * (src_pos + len1)];
-
-            if (cost1 < cost) {
-                cost = cost1;
-                factor_offs = offs1;
-                factor_len = len1;
-            }
-        }
-
-        int32_t len2 = aux[3 + 4 * src_pos];
-        if (len2 >= min_factor_len) {
-            int32_t offs2 = aux[2 + 4 * src_pos];
-            int32_t cost2 = 1 + factor_offs_bitsize(offs2) +
-                            factor_len_bitsize(len2) +
-                            aux[2 + 4 * (src_pos + len2)];
-
-            if (cost2 < cost) {
-                cost = cost2;
-                factor_offs = offs2;
-                factor_len = len2;
-            }
-        }
-
-        aux[0 + 4 * src_pos] = factor_offs;
-        aux[1 + 4 * src_pos] = factor_len;
-        aux[2 + 4 * src_pos] = cost;
-    }
-
-#ifdef ENABLE_STATS
-    increment_clock(st.mincost_time);
-#endif
-
     struct io_stream *main = &ctx->main;
     out_stream_init(main);
 
+    struct factor_ctx fctx;
+    init_factor_ctx(&fctx);
+
     size_t src_pos = 0;
+    write_bit(main, 0);
+    assert(src_pos < src_len);
+    cpy_u8_tos(main, src, src_pos++);
     while (src_pos < src_len) {
-        uint32_t factor_len = (uint32_t)aux[1 + 4 * src_pos];
+        int32_t psv = psv_nsv[0 + 2 * src_pos];
+        int32_t nsv = psv_nsv[1 + 2 * src_pos];
+
+        lz_factor(&fctx, src, src_len, src_pos, psv, nsv);
+
+        uint32_t psv_offs = src_pos - fctx.psv;
+        uint32_t psv_len = fctx.psv_len;
+        uint32_t nsv_offs = src_pos - fctx.nsv;
+        uint32_t nsv_len = fctx.nsv_len;
+
+        uint32_t factor_offs = (psv_len == nsv_len) * min(psv_offs, nsv_offs) +
+                               (psv_len > nsv_len) * psv_offs +
+                               (nsv_len > psv_len) * nsv_offs;
+
+        uint32_t factor_len = max(psv_len, nsv_len);
+
+        factor_len *= ((factor_len >= min_factor_len) &&
+                       (factor_offs_bytesize(factor_offs) < factor_len));
+
         if (!factor_len) {
             write_bit(main, 0);
             assert(src_pos < src_len);
             cpy_u8_tos(main, src, src_pos++);
         } else {
             write_bit(main, 1);
-            uint32_t factor_offs = (uint32_t)aux[0 + 4 * src_pos];
             assert(factor_offs <= src_pos);
             write_factor_offs(main, factor_offs);
             write_factor_len(main, factor_len);
