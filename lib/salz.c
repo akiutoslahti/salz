@@ -103,10 +103,30 @@ static void cpy_u8_tos(struct io_stream *stream, uint8_t *src,
     stream->buf[stream->buf_pos++] = src[src_pos];
 }
 
-static void cpy_factor(uint8_t *buf, size_t cpy_pos, size_t pos, size_t len)
+static const int inc1[8] = { 0, 1, 2, 1, 4, 4, 4, 4 };
+static const int inc2[8] = { 0, 1, 2, 2, 4, 3, 2, 1 };
+
+static void cpy_factor(uint8_t *buf, size_t pos, size_t offs, size_t len)
 {
-    while (len--)
-        buf[pos++] = buf[cpy_pos++];
+    uint8_t *src = &buf[pos - offs];
+    uint8_t *dst = &buf[pos];
+    uint8_t *end = dst + len;
+
+    if (offs < 8) {
+        dst[0] = src[0];
+        dst[1] = src[1];
+        dst[2] = src[2];
+        dst[3] = src[3];
+        memcpy(&dst[4], &src[inc1[offs]], 4);
+        src += inc2[offs];
+        dst += 8;
+    }
+
+    while (dst < end) {
+        memcpy(dst, src, 8);
+        dst += 8;
+        src += 8;
+    }
 }
 
 static size_t read_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
@@ -602,6 +622,8 @@ static void lz_factor(struct factor_ctx *ctx, uint8_t *text,
     ctx->nsv_len = nsv_len;
 }
 
+#define last_literals 8
+
 uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
         size_t src_len, uint8_t *dst, size_t dst_len)
 {
@@ -609,10 +631,14 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     unused(dst_len);
 #endif
 
+    src_len -= last_literals;
+
     if (ctx->sa == NULL ||
         ctx->aux == NULL ||
         ctx->sa_len < src_len + 2 ||
-        ctx->aux_len < 5 * (src_len + 1)) {
+        ctx->aux_len < 5 * (src_len + 1) ||
+        ctx->main.buf == NULL ||
+        ctx->ordinals.buf == NULL) {
         debug("Allocated resources are not enough");
         return 0;
     }
@@ -765,13 +791,19 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
         }
     }
 
+    src_len += last_literals;
+    for (size_t i = 0; i < last_literals; i++) {
+        write_bit(main, 0);
+        assert(src_pos < src_len);
+        cpy_u8_tos(main, src, src_pos++);
+    }
+
     if (stream_len(main) + stream_len(ordinals) >= src_len + 18) {
         out_stream_init(main);
         out_stream_init(ordinals);
         src_pos = 0;
     }
 
-    write_bit(main, 0);
     write_vnibble(ordinals, (uint32_t)(ord - prev_ord));
 
     size_t dst_pos = 0;
@@ -812,11 +844,8 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     size_t prev_offs = 0;
     size_t ord = 0;
     size_t next_ord = read_vnibble(&ordinals);
-    while (true) {
+    while (!stream_empty(&main)) {
         if (!read_bit(&main)) {
-            if (stream_empty(&main))
-                break;
-
             assert(dst_pos < dst_len);
             cpy_u8_froms(&main, dst, dst_pos++);
         } else {
@@ -833,7 +862,7 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
             assert(factor_offs <= dst_pos);
             assert(dst_pos + factor_len < dst_len + 1);
-            cpy_factor(dst, dst_pos - factor_offs, dst_pos, factor_len);
+            cpy_factor(dst, dst_pos, factor_offs, factor_len);
             dst_pos += factor_len;
 
             prev_offs = factor_offs;
