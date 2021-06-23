@@ -61,11 +61,6 @@
         } while (0)
 #endif
 
-static size_t read_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
-        uint32_t *res);
-static size_t write_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
-        uint32_t val);
-
 struct io_stream {
     uint8_t *buf;
     size_t buf_len;
@@ -75,10 +70,47 @@ struct io_stream {
     size_t bits_pos;
 };
 
+void encode_ctx_init(struct encode_ctx **ctx_out, size_t src_len)
+{
+    size_t sa_len = src_len + 2;
+    size_t aux_len = 5 * (src_len + 1);
+    int32_t *sa = malloc(sa_len * sizeof(*sa));
+    int32_t *aux = malloc(aux_len * sizeof(*aux));
+
+    if (!sa || !aux) {
+        debug("Resource allocation failed");
+        free(sa);
+        free(aux);
+        *ctx_out = NULL;
+        return;
+    }
+
+    struct encode_ctx *ctx = malloc(sizeof(*ctx));
+    ctx->sa = sa;
+    ctx->sa_len = sa_len;
+    ctx->aux = aux;
+    ctx->aux_len = aux_len;
+    *ctx_out = ctx;
+}
+
+void encode_ctx_fini(struct encode_ctx **ctx)
+{
+    free((*ctx)->sa);
+    free((*ctx)->aux);
+    free(*ctx);
+    *ctx = NULL;
+}
+
 static uint8_t read_u8(struct io_stream *stream)
 {
     assert(stream->buf_pos < stream->buf_len);
     return stream->buf[stream->buf_pos++];
+}
+
+static void write_u8(struct io_stream *stream, uint8_t val)
+{
+    assert(stream->buf_pos < stream->buf_len);
+    stream->buf[stream->buf_pos++] = val;
 }
 
 static uint64_t read_u64(uint8_t *src, size_t pos)
@@ -88,12 +120,6 @@ static uint64_t read_u64(uint8_t *src, size_t pos)
     memcpy(&val, &src[pos], sizeof(val));
 
     return val;
-}
-
-static void write_u8(struct io_stream *stream, uint8_t val)
-{
-    assert(stream->buf_pos < stream->buf_len);
-    stream->buf[stream->buf_pos++] = val;
 }
 
 static void write_u64(uint8_t *dst, size_t pos, uint64_t val)
@@ -119,6 +145,115 @@ static void cpy_factor(uint8_t *buf, size_t cpy_pos, size_t pos, size_t len)
 {
     while (len--)
         buf[pos++] = buf[cpy_pos++];
+}
+
+static size_t vbyte_size(uint32_t val)
+{
+    if (val < 128)
+        return 1;
+
+    if (val < 16512)
+        return 2;
+
+    if (val < 2113664)
+        return 3;
+
+    if (val < 270549120)
+        return 4;
+
+    return 5;
+}
+
+static size_t read_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
+        uint32_t *res)
+{
+#ifdef NDEBUG
+    unused(buf_len);
+#endif
+
+    assert(pos < buf_len);
+    uint8_t byte = buf[pos++];
+    *res = byte & 0x7fu;
+
+    if (byte >= 0x80u)
+        return 1;
+
+    assert(pos < buf_len);
+    byte = buf[pos++];
+    *res = ((*res + 1) << 7) | (byte & 0x7fu);
+    if (byte >= 0x80u)
+        return 2;
+
+    assert(pos < buf_len);
+    byte = buf[pos++];
+    *res = ((*res + 1) << 7) | (byte & 0x7fu);
+    if (byte >= 0x80u)
+        return 3;
+
+    assert(pos < buf_len);
+    byte = buf[pos++];
+    *res = ((*res + 1) << 7) | (byte & 0x7fu);
+    if (byte >= 0x80u)
+        return 4;
+
+    assert(pos < buf_len);
+    byte = buf[pos++];
+    *res = ((*res + 1) << 7) | (byte & 0x7fu);
+    return 5;
+}
+
+static size_t encode_vbyte(uint32_t val, uint64_t *res)
+{
+    uint8_t *p = (uint8_t *)res;
+
+    if  (val < 128) {
+        p[0] = val | 0x80u;
+        return 1;
+    }
+
+    if (val < 16512) {
+        p[0] = (val - 128) >> 7;
+        p[1] = (val & 0x7fu) | 0x80u;
+        return 2;
+    }
+
+    if (val < 2113664) {
+        p[0] = (val - 16512) >> 14;
+        p[1] = ((val - 128) >> 7) & 0x7fu;
+        p[2] = (val & 0x7fu) | 0x80u;
+        return 3;
+    }
+
+    if (val < 270549120) {
+        p[0] = (val - 2113664) >> 21;
+        p[1] = ((val - 16512) >> 14) & 0x7fu;
+        p[2] = ((val - 128) >> 7) & 0x7fu;
+        p[3] = (val & 0x7fu) | 0x80u;
+        return 4;
+    }
+
+    p[0] = (val - 270549120) >> 28;
+    p[1] = ((val - 2113664) >> 21) & 0x7fu;
+    p[2] = ((val - 16512) >> 14) & 0x7fu;
+    p[3] = ((val - 128) >> 7) & 0x7fu;
+    p[4] = (val & 0x7fu) | 0x80u;
+    return 5;
+}
+
+static size_t write_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
+        uint32_t val)
+{
+#ifdef NDEBUG
+    unused(buf_len);
+#endif
+
+    uint64_t vbyte;
+    size_t vbyte_len = encode_vbyte(val, &vbyte);
+
+    assert(pos + vbyte_len < buf_len + 1);
+    memcpy(&buf[pos], &vbyte, vbyte_len);
+
+    return vbyte_len;
 }
 
 static bool stream_empty(struct io_stream *stream)
@@ -204,6 +339,17 @@ static void queue_bits(struct io_stream *stream)
     stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
 }
 
+static void flush_bits(struct io_stream *stream)
+{
+    assert(stream->buf_pos + field_sizeof(struct io_stream, bits) <
+           stream->buf_len + 1);
+    write_u64(stream->buf, stream->bits_pos, stream->bits);
+    stream->bits = 0;
+    stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
+    stream->bits_pos = stream->buf_pos;
+    stream->buf_pos += field_sizeof(struct io_stream, bits);
+}
+
 static uint8_t read_bit(struct io_stream *stream)
 {
     if (!stream->bits_avail)
@@ -214,6 +360,15 @@ static uint8_t read_bit(struct io_stream *stream)
     stream->bits_avail -= 1;
 
     return ret;
+}
+
+static void write_bit(struct io_stream *stream, uint8_t bit)
+{
+    if (!stream->bits_avail)
+        flush_bits(stream);
+
+    stream->bits = (stream->bits << 1) | bit;
+    stream->bits_avail -= 1;
 }
 
 static uint64_t read_bits(struct io_stream *stream, size_t count)
@@ -235,63 +390,6 @@ static uint64_t read_bits(struct io_stream *stream, size_t count)
     stream->bits_avail -= count;
 
     return ret;
-}
-
-static uint8_t read_nibble(struct io_stream *stream)
-{
-    uint8_t ret = 0;
-
-    if (!stream->bits_avail)
-        queue_bits(stream);
-
-    if (stream->bits_avail < 4)
-        return (uint8_t)read_bits(stream, 4);
-
-    ret = stream->bits >> 60;
-    stream->bits <<= 4;
-    stream->bits_avail -= 4;
-
-    return ret;
-}
-
-static uint32_t read_unary(struct io_stream *stream)
-{
-    if (!stream->bits_avail)
-        queue_bits(stream);
-
-    uint32_t ret = 0;
-
-    while (!stream->bits) {
-        ret += stream->bits_avail;
-
-        queue_bits(stream);
-    }
-
-    uint32_t last_zeros = __builtin_clzll(stream->bits);
-    stream->bits <<= last_zeros + 1;
-    stream->bits_avail -= last_zeros + 1;
-
-    return ret + last_zeros;
-}
-
-static void flush_bits(struct io_stream *stream)
-{
-    assert(stream->buf_pos + field_sizeof(struct io_stream, bits) <
-           stream->buf_len + 1);
-    write_u64(stream->buf, stream->bits_pos, stream->bits);
-    stream->bits = 0;
-    stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
-    stream->bits_pos = stream->buf_pos;
-    stream->buf_pos += field_sizeof(struct io_stream, bits);
-}
-
-static void write_bit(struct io_stream *stream, uint8_t bit)
-{
-    if (!stream->bits_avail)
-        flush_bits(stream);
-
-    stream->bits = (stream->bits << 1) | bit;
-    stream->bits_avail -= 1;
 }
 
 static void write_bits(struct io_stream *stream, uint64_t bits, size_t count)
@@ -325,6 +423,26 @@ static void write_zeros(struct io_stream *stream, size_t count)
     }
 }
 
+static uint32_t read_unary(struct io_stream *stream)
+{
+    if (!stream->bits_avail)
+        queue_bits(stream);
+
+    uint32_t ret = 0;
+
+    while (!stream->bits) {
+        ret += stream->bits_avail;
+
+        queue_bits(stream);
+    }
+
+    uint32_t last_zeros = __builtin_clzll(stream->bits);
+    stream->bits <<= last_zeros + 1;
+    stream->bits_avail -= last_zeros + 1;
+
+    return ret + last_zeros;
+}
+
 static void write_unary(struct io_stream *stream, uint32_t val)
 {
     write_zeros(stream, val);
@@ -336,15 +454,15 @@ static size_t gr3_bitsize(uint32_t val)
     return (val >> 3) + 1 + 3;
 }
 
+static uint32_t read_gr3(struct io_stream *stream)
+{
+    return (read_unary(stream) << 3) | read_bits(stream, 3);
+}
+
 static void write_gr3(struct io_stream *stream, uint32_t val)
 {
     write_unary(stream, val >> 3);
     write_bits(stream, val & ((1u << 3) - 1), 3);
-}
-
-static uint32_t read_gr3(struct io_stream *stream)
-{
-    return (read_unary(stream) << 3) | read_bits(stream, 3);
 }
 
 static size_t vnibble_size(uint32_t val)
@@ -385,6 +503,23 @@ static size_t vnibble_size(uint32_t val)
 static size_t vnibble_bitsize(uint32_t val)
 {
     return 4 * vnibble_size(val);
+}
+
+static uint8_t read_nibble(struct io_stream *stream)
+{
+    uint8_t ret = 0;
+
+    if (!stream->bits_avail)
+        queue_bits(stream);
+
+    if (stream->bits_avail < 4)
+        return (uint8_t)read_bits(stream, 4);
+
+    ret = stream->bits >> 60;
+    stream->bits <<= 4;
+    stream->bits_avail -= 4;
+
+    return ret;
 }
 
 static uint32_t read_vnibble(struct io_stream *stream)
@@ -549,105 +684,38 @@ static void write_vnibble(struct io_stream *stream, uint32_t val)
     write_bits(stream, nibbles, nibbles_len * 4);
 }
 
-static size_t read_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
-        uint32_t *res)
-{
-#ifdef NDEBUG
-    unused(buf_len);
-#endif
-
-    size_t orig_pos = pos;
-
-    assert(pos < buf_len);
-    uint8_t byte = buf[pos++];
-    *res = byte & 0x7fu;
-
-    while (byte < 0x80u) {
-        assert(pos < buf_len);
-        byte = buf[pos++];
-        *res = ((*res + 1) << 7) | (byte & 0x7fu);
-    }
-
-    return pos - orig_pos;
-}
-
-static size_t vbyte_size(uint32_t val)
-{
-    size_t vbyte_len = 1;
-
-    while (val >>= 7) {
-        val -= 1;
-        vbyte_len += 1;
-    }
-
-    return vbyte_len;
-}
-
-static size_t encode_vbyte(uint32_t val, uint64_t *res)
-{
-    size_t vbyte_len = 1;
-    *res = (val & 0x7fu) | 0x80u;
-
-    while (val >>= 7) {
-        val -= 1;
-        *res = (*res << 8) | (val & 0x7fu);
-        vbyte_len += 1;
-    }
-
-    return vbyte_len;
-}
-
-static size_t write_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
-        uint32_t val)
-{
-#ifdef NDEBUG
-    unused(buf_len);
-#endif
-
-    size_t orig_pos = pos;
-
-    uint64_t vbyte;
-    size_t vbyte_len = encode_vbyte(val, &vbyte);
-
-    assert(pos + vbyte_len < buf_len + 1);
-
-    while (vbyte_len--) {
-        buf[pos++] = vbyte & 0xffu;
-        vbyte >>= 8;
-    }
-
-    return pos - orig_pos;
-}
+#define min_factor_offs 1
+#define min_factor_len 3
 
 static size_t factor_offs_bitsize(uint32_t val)
 {
-    return 8 + vnibble_bitsize((val - 1) >> 8);
-}
-
-static void write_factor_offs(struct io_stream *stream, uint32_t val)
-{
-    write_vnibble(stream, (val - 1) >> 8);
-    write_u8(stream, (val - 1) & 0xffu);
+    return 8 + vnibble_bitsize((val - min_factor_offs) >> 8);
 }
 
 static uint32_t read_factor_offs(struct io_stream *stream)
 {
-    return ((read_vnibble(stream) << 8) | read_u8(stream)) + 1;
+    return ((read_vnibble(stream) << 8) | read_u8(stream)) + min_factor_offs;
+}
+
+static void write_factor_offs(struct io_stream *stream, uint32_t val)
+{
+    write_vnibble(stream, (val - min_factor_offs) >> 8);
+    write_u8(stream, (val - min_factor_offs) & 0xffu);
 }
 
 static size_t factor_len_bitsize(uint32_t val)
 {
-    return gr3_bitsize(val - 3);
-}
-
-static void write_factor_len(struct io_stream *stream, uint32_t val)
-{
-    write_gr3(stream, val - 3);
+    return gr3_bitsize(val - min_factor_len);
 }
 
 static uint32_t read_factor_len(struct io_stream *stream)
 {
-    return read_gr3(stream) + 3;
+    return read_gr3(stream) + min_factor_len;
+}
+
+static void write_factor_len(struct io_stream *stream, uint32_t val)
+{
+    write_gr3(stream, val - min_factor_len);
 }
 
 static size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
@@ -966,35 +1034,4 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     }
 
     return (uint32_t)dst_pos;
-}
-
-void encode_ctx_init(struct encode_ctx **ctx_out, size_t src_len)
-{
-    size_t sa_len = src_len + 2;
-    size_t aux_len = 5 * (src_len + 1);
-    int32_t *sa = malloc(sa_len * sizeof(*sa));
-    int32_t *aux = malloc(aux_len * sizeof(*aux));
-
-    if (!sa || !aux) {
-        debug("Resource allocation failed");
-        free(sa);
-        free(aux);
-        *ctx_out = NULL;
-        return;
-    }
-
-    struct encode_ctx *ctx = malloc(sizeof(*ctx));
-    ctx->sa = sa;
-    ctx->sa_len = sa_len;
-    ctx->aux = aux;
-    ctx->aux_len = aux_len;
-    *ctx_out = ctx;
-}
-
-void encode_ctx_fini(struct encode_ctx **ctx)
-{
-    free((*ctx)->sa);
-    free((*ctx)->aux);
-    free(*ctx);
-    *ctx = NULL;
 }
