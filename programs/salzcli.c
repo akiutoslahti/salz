@@ -16,50 +16,52 @@
 #include <string.h>
 
 #include "common.h"
+#include "vlc.h"
 #include "salz.h"
 
 #define DEFAULT_LOG2_BLOCK_SIZE 16
 
-static inline size_t fwrite_vbyte(FILE *stream, uint32_t val)
-{
-    size_t vbyte_len = 0;
-
-    while (val > 0x7f) {
-        if (fputc(val & 0x7f, stream) == EOF)
-            return 0;
-
-        val >>= 7;
-        vbyte_len += 1;
-    }
-
-    if (fputc(val | 0x80, stream) == EOF)
-        return 0;
-
-    vbyte_len += 1;
-
-    return vbyte_len;
-}
-
 static inline size_t fread_vbyte(FILE *stream, uint32_t *res)
 {
-    int32_t vbyte_len = 0;
-    int c;
+    int byte;
 
-    *res = 0;
+    if ((byte = fgetc(stream)) == EOF)
+        return 0;
+    *res = (unsigned int)byte & 0x7fu;
+    if ((unsigned int)byte >= 0x80u)
+        return 1;
 
-    while (true) {
-        if ((c = fgetc(stream)) == EOF)
-            return 0;
+    if ((byte = fgetc(stream)) == EOF)
+        return 0;
+    *res = ((*res + 1) << 7) | ((unsigned int)byte & 0x7fu);
+    if ((unsigned int)byte >= 0x80u)
+        return 2;
 
-        if (c > 0x7f)
-            break;
+    if ((byte = fgetc(stream)) == EOF)
+        return 0;
+    *res = ((*res + 1) << 7) | ((unsigned int)byte & 0x7fu);
+    if ((unsigned int)byte >= 0x80u)
+        return 3;
 
-        *res = (c << (7 * vbyte_len)) | *res;
-        vbyte_len += 1;
-    }
+    if ((byte = fgetc(stream)) == EOF)
+        return 0;
+    *res = ((*res + 1) << 7) | ((unsigned int)byte & 0x7fu);
+    if ((unsigned int)byte >= 0x80u)
+        return 4;
 
-    *res = ((c & 0x7f) << (7 * vbyte_len)) | *res;
-    vbyte_len += 1;
+    if ((byte = fgetc(stream)) == EOF)
+        return 0;
+    *res = ((*res + 1) << 7) | ((unsigned int)byte & 0x7fu);
+    return 5;
+}
+
+static inline size_t fwrite_vbyte(FILE *stream, uint32_t val)
+{
+    uint64_t vbyte;
+    size_t vbyte_len = encode_vbyte_be(val, &vbyte);
+
+    if (!fwrite(&vbyte, vbyte_len, 1, stream))
+        return 0;
 
     return vbyte_len;
 }

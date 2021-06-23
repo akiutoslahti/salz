@@ -9,9 +9,11 @@
 
 #include <limits.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "salz.h"
+#include "vlc.h"
 #include "libsais.h"
 
 #ifdef NDEBUG
@@ -147,23 +149,6 @@ static void cpy_factor(uint8_t *buf, size_t cpy_pos, size_t pos, size_t len)
         buf[pos++] = buf[cpy_pos++];
 }
 
-static size_t vbyte_size(uint32_t val)
-{
-    if (val < 128)
-        return 1;
-
-    if (val < 16512)
-        return 2;
-
-    if (val < 2113664)
-        return 3;
-
-    if (val < 270549120)
-        return 4;
-
-    return 5;
-}
-
 static size_t read_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
         uint32_t *res)
 {
@@ -202,44 +187,6 @@ static size_t read_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
     return 5;
 }
 
-static size_t encode_vbyte(uint32_t val, uint64_t *res)
-{
-    uint8_t *p = (uint8_t *)res;
-
-    if  (val < 128) {
-        p[0] = val | 0x80u;
-        return 1;
-    }
-
-    if (val < 16512) {
-        p[0] = (val - 128) >> 7;
-        p[1] = (val & 0x7fu) | 0x80u;
-        return 2;
-    }
-
-    if (val < 2113664) {
-        p[0] = (val - 16512) >> 14;
-        p[1] = ((val - 128) >> 7) & 0x7fu;
-        p[2] = (val & 0x7fu) | 0x80u;
-        return 3;
-    }
-
-    if (val < 270549120) {
-        p[0] = (val - 2113664) >> 21;
-        p[1] = ((val - 16512) >> 14) & 0x7fu;
-        p[2] = ((val - 128) >> 7) & 0x7fu;
-        p[3] = (val & 0x7fu) | 0x80u;
-        return 4;
-    }
-
-    p[0] = (val - 270549120) >> 28;
-    p[1] = ((val - 2113664) >> 21) & 0x7fu;
-    p[2] = ((val - 16512) >> 14) & 0x7fu;
-    p[3] = ((val - 128) >> 7) & 0x7fu;
-    p[4] = (val & 0x7fu) | 0x80u;
-    return 5;
-}
-
 static size_t write_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
         uint32_t val)
 {
@@ -248,7 +195,7 @@ static size_t write_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
 #endif
 
     uint64_t vbyte;
-    size_t vbyte_len = encode_vbyte(val, &vbyte);
+    size_t vbyte_len = encode_vbyte_be(val, &vbyte);
 
     assert(pos + vbyte_len < buf_len + 1);
     memcpy(&buf[pos], &vbyte, vbyte_len);
@@ -465,41 +412,6 @@ static void write_gr3(struct io_stream *stream, uint32_t val)
     write_bits(stream, val & ((1u << 3) - 1), 3);
 }
 
-static size_t vnibble_size(uint32_t val)
-{
-    if (val < 8)
-        return 1;
-
-    if (val < 72)
-        return 2;
-
-    if (val < 584)
-        return 3;
-
-    if (val < 4680)
-        return 4;
-
-    if (val < 37448)
-        return 5;
-
-    if (val < 299592)
-        return 6;
-
-    if (val < 2396744)
-        return 7;
-
-    if (val < 19173960)
-        return 8;
-
-    if (val < 153391688)
-        return 9;
-
-    if (val < 1227133512)
-        return 10;
-
-    return 11;
-}
-
 static size_t vnibble_bitsize(uint32_t val)
 {
     return 4 * vnibble_size(val);
@@ -580,106 +492,11 @@ static uint32_t read_vnibble(struct io_stream *stream)
     return ret;
 }
 
-static size_t encode_vnibble(uint32_t val, uint64_t *res)
-{
-    uint8_t *p = (uint8_t *)res;
-
-    uint32_t v0 = val;
-
-    if (val < 8) {
-        p[0] = v0 | 0x8u;
-        return 1;
-    }
-
-    if (val < 72) {
-        p[0] = (((v0 >> 3) - 1) << 4) | ((v0 & 0x7u) | 0x8u);
-        return 2;
-    }
-
-    uint32_t v1 = val - 72;
-
-    if (val < 584) {
-        p[0] = ((((v0 >> 3) - 1) & 0x7u) << 4) | ((v0 & 0x7u) | 0x8u);
-        p[1] = v1 >> 6;
-        return 3;
-    }
-
-    if (val < 4680) {
-        p[0] = ((((v0 >> 3) - 1) & 0x7u) << 4) | ((v0 & 0x7u) | 0x8u);
-        p[1] = (((v1 >> 9) - 1) << 4) | ((v1 >> 6) & 0x7u);
-        return 4;
-    }
-
-    uint32_t v2 = val - 4680;
-
-    if (val < 37448) {
-        p[0] = ((((v0 >> 3) - 1) & 0x7u) << 4) | ((v0 & 0x7u) | 0x8u);
-        p[1] = ((((v1 >> 9) - 1) & 0x7u) << 4) | ((v1 >> 6) & 0x7u);
-        p[2] = v2 >> 12;
-        return 5;
-    }
-
-    if (val < 299592) {
-        p[0] = ((((v0 >> 3) - 1) & 0x7u) << 4) | ((v0 & 0x7u) | 0x8u);
-        p[1] = ((((v1 >> 9) - 1) & 0x7u) << 4) | ((v1 >> 6) & 0x7u);
-        p[2] = (((v2 >> 15) - 1) << 4) | ((v2 >> 12) & 0x7u);
-        return 6;
-    }
-
-    uint32_t v3 = val - 299592;
-
-    if (val < 2396744) {
-        p[0] = ((((v0 >> 3) - 1) & 0x7u) << 4) | ((v0 & 0x7u) | 0x8u);
-        p[1] = ((((v1 >> 9) - 1) & 0x7u) << 4) | ((v1 >> 6) & 0x7u);
-        p[2] = ((((v2 >> 15) - 1) & 0x7u) << 4) | ((v2 >> 12) & 0x7u);
-        p[3] = v3 >> 18;
-        return 7;
-    }
-
-    if (val < 19173960) {
-        p[0] = ((((v0 >> 3) - 1) & 0x7u) << 4) | ((v0 & 0x7u) | 0x8u);
-        p[1] = ((((v1 >> 9) - 1) & 0x7u) << 4) | ((v1 >> 6) & 0x7u);
-        p[2] = ((((v2 >> 15) - 1) & 0x7u) << 4) | ((v2 >> 12) & 0x7u);
-        p[3] = (((v3 >> 21) - 1) << 4) | ((v3 >> 18) & 0x7u);
-        return 8;
-    }
-
-    uint32_t v4 = val - 19173960;
-
-    if (val < 153391688) {
-        p[0] = ((((v0 >> 3) - 1) & 0x7u) << 4) | ((v0 & 0x7u) | 0x8u);
-        p[1] = ((((v1 >> 9) - 1) & 0x7u) << 4) | ((v1 >> 6) & 0x7u);
-        p[2] = ((((v2 >> 15) - 1) & 0x7u) << 4) | ((v2 >> 12) & 0x7u);
-        p[3] = ((((v3 >> 21) - 1) & 0x7u) << 4) | ((v3 >> 18) & 0x7u);
-        p[4] = v4 >> 24;
-        return 9;
-    }
-
-    if (val < 1227133512) {
-        p[0] = ((((v0 >> 3) - 1) & 0x7u) << 4) | ((v0 & 0x7u) | 0x8u);
-        p[1] = ((((v1 >> 9) - 1) & 0x7u) << 4) | ((v1 >> 6) & 0x7u);
-        p[2] = ((((v2 >> 15) - 1) & 0x7u) << 4) | ((v2 >> 12) & 0x7u);
-        p[3] = ((((v3 >> 21) - 1) & 0x7u) << 4) | ((v3 >> 18) & 0x7u);
-        p[4] = (((v4 >> 27) - 1) << 4) | ((v4 >> 24) & 0x7u);
-        return 10;
-    }
-
-    uint32_t v5 = val - 1227133512;
-
-    p[0] = ((((v0 >> 3) - 1) & 0x7u) << 4) | ((v0 & 0x7u) | 0x8u);
-    p[1] = ((((v1 >> 9) - 1) & 0x7u) << 4) | ((v1 >> 6) & 0x7u);
-    p[2] = ((((v2 >> 15) - 1) & 0x7u) << 4) | ((v2 >> 12) & 0x7u);
-    p[3] = ((((v3 >> 21) - 1) & 0x7u) << 4) | ((v3 >> 18) & 0x7u);
-    p[4] = ((((v4 >> 27) - 1) & 0x7u) << 4) | ((v4 >> 24) & 0x7u);
-    p[5] = v5 >> 30;
-    return 11;
-}
-
 static void write_vnibble(struct io_stream *stream, uint32_t val)
 {
     uint64_t nibbles;
 
-    size_t nibbles_len = encode_vnibble(val, &nibbles);
+    size_t nibbles_len = encode_vnibble_le(val, &nibbles);
 
     write_bits(stream, nibbles, nibbles_len * 4);
 }

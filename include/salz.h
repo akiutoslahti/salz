@@ -10,8 +10,8 @@
 #ifndef SALZ_H
 #define SALZ_H
 
+#include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
 
 #ifdef ENABLE_STATS
 #include "common.h"
