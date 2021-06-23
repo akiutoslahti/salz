@@ -63,46 +63,6 @@
         } while (0)
 #endif
 
-struct io_stream {
-    uint8_t *buf;
-    size_t buf_len;
-    size_t buf_pos;
-    uint64_t bits;
-    size_t bits_avail;
-    size_t bits_pos;
-};
-
-void encode_ctx_init(struct encode_ctx **ctx_out, size_t src_len)
-{
-    size_t sa_len = src_len + 2;
-    size_t aux_len = 5 * (src_len + 1);
-    int32_t *sa = malloc(sa_len * sizeof(*sa));
-    int32_t *aux = malloc(aux_len * sizeof(*aux));
-
-    if (!sa || !aux) {
-        debug("Resource allocation failed");
-        free(sa);
-        free(aux);
-        *ctx_out = NULL;
-        return;
-    }
-
-    struct encode_ctx *ctx = malloc(sizeof(*ctx));
-    ctx->sa = sa;
-    ctx->sa_len = sa_len;
-    ctx->aux = aux;
-    ctx->aux_len = aux_len;
-    *ctx_out = ctx;
-}
-
-void encode_ctx_fini(struct encode_ctx **ctx)
-{
-    free((*ctx)->sa);
-    free((*ctx)->aux);
-    free(*ctx);
-    *ctx = NULL;
-}
-
 static uint8_t read_u8(struct io_stream *stream)
 {
     assert(stream->buf_pos < stream->buf_len);
@@ -201,80 +161,6 @@ static size_t write_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
     memcpy(&buf[pos], &vbyte, vbyte_len);
 
     return vbyte_len;
-}
-
-static bool stream_empty(struct io_stream *stream)
-{
-    return stream->buf_pos == stream->buf_len;
-}
-
-static size_t stream_len(struct io_stream *stream)
-{
-    return stream->buf_pos;
-}
-
-static size_t in_stream_init(struct io_stream *stream, uint8_t *src,
-        size_t src_len, size_t src_pos)
-{
-    size_t orig_pos = src_pos;
-
-    uint32_t stream_size;
-    src_pos += read_vbyte(src, src_len, src_pos, &stream_size);
-
-    assert(field_sizeof(struct io_stream, bits) < stream_size + 1);
-    stream->buf = &src[src_pos];
-    stream->buf_len = stream_size;
-    stream->buf_pos = field_sizeof(struct io_stream, bits);
-    stream->bits = read_u64(stream->buf, 0);
-    stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
-
-    return (src_pos + stream_size) - orig_pos;
-}
-
-static bool out_stream_init(struct io_stream *stream, size_t size)
-{
-    stream->buf = malloc(size);
-
-    if (!stream->buf)
-        return false;
-
-    assert(field_sizeof(struct io_stream, bits) < size + 1);
-    stream->buf_len = size;
-    stream->buf_pos = field_sizeof(struct io_stream, bits);
-    stream->bits = 0;
-    stream->bits_pos = 0;
-    stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
-
-    return true;
-}
-
-static void out_stream_reset(struct io_stream *stream)
-{
-    assert(field_sizeof(struct io_stream, bits) < stream->buf_len + 1);
-    stream->buf_pos = field_sizeof(struct io_stream, bits);
-    stream->bits = 0;
-    stream->bits_pos = 0;
-    stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
-}
-
-static size_t out_stream_fini(struct io_stream *stream, uint8_t *dst,
-        size_t dst_len, size_t dst_pos)
-{
-    size_t orig_pos = dst_pos;
-
-    stream->bits <<= (stream->bits_avail);
-    write_u64(stream->buf, stream->bits_pos, stream->bits);
-
-    if (dst) {
-        dst_pos += write_vbyte(dst, dst_len, dst_pos, stream->buf_pos);
-        assert(dst_pos + stream->buf_pos < dst_len + 1);
-        memcpy(&dst[dst_pos], stream->buf, stream->buf_pos);
-        dst_pos += stream->buf_pos;
-    }
-
-    free(stream->buf);
-
-    return dst_pos - orig_pos;
 }
 
 static void queue_bits(struct io_stream *stream)
@@ -501,6 +387,128 @@ static void write_vnibble(struct io_stream *stream, uint32_t val)
     write_bits(stream, nibbles, nibbles_len * 4);
 }
 
+static bool stream_empty(struct io_stream *stream)
+{
+    return stream->buf_pos == stream->buf_len;
+}
+
+static size_t stream_len(struct io_stream *stream)
+{
+    return stream->buf_pos;
+}
+
+static size_t in_stream_init(struct io_stream *stream, uint8_t *src,
+        size_t src_len, size_t src_pos)
+{
+    size_t orig_pos = src_pos;
+
+    uint32_t stream_size;
+    src_pos += read_vbyte(src, src_len, src_pos, &stream_size);
+
+    assert(field_sizeof(struct io_stream, bits) < stream_size + 1);
+    stream->buf = &src[src_pos];
+    stream->buf_len = stream_size;
+    stream->buf_pos = field_sizeof(struct io_stream, bits);
+    stream->bits = read_u64(stream->buf, 0);
+    stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
+
+    return (src_pos + stream_size) - orig_pos;
+}
+
+static bool out_stream_alloc(struct io_stream *stream, size_t size)
+{
+    stream->buf = malloc(size);
+
+    if (!stream->buf)
+        return false;
+
+    stream->buf_len = size;
+
+    return true;
+}
+
+static void out_stream_free(struct io_stream *stream)
+{
+    free(stream->buf);
+}
+
+static void out_stream_init(struct io_stream *stream)
+{
+    assert(field_sizeof(struct io_stream, bits) < stream->buf_len + 1);
+    stream->buf_pos = field_sizeof(struct io_stream, bits);
+    stream->bits = 0;
+    stream->bits_pos = 0;
+    stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
+}
+
+static size_t out_stream_fini(struct io_stream *stream, uint8_t *dst,
+        size_t dst_len, size_t dst_pos)
+{
+    size_t orig_pos = dst_pos;
+
+    stream->bits <<= (stream->bits_avail);
+    write_u64(stream->buf, stream->bits_pos, stream->bits);
+
+    if (dst) {
+        dst_pos += write_vbyte(dst, dst_len, dst_pos, stream->buf_pos);
+        assert(dst_pos + stream->buf_pos < dst_len + 1);
+        memcpy(&dst[dst_pos], stream->buf, stream->buf_pos);
+        dst_pos += stream->buf_pos;
+    }
+
+    return dst_pos - orig_pos;
+}
+
+void encode_ctx_init(struct encode_ctx **ctx_out, size_t src_len)
+{
+    *ctx_out = NULL;
+
+    struct encode_ctx *ctx = malloc(sizeof(*ctx));
+
+    if (!ctx)
+        return;
+
+    ctx->sa_len = src_len + 2;
+    ctx->aux_len = 5 * (src_len + 1);
+
+    ctx->sa = malloc(ctx->sa_len * sizeof(*(ctx->sa)));
+    ctx->aux = malloc(ctx->aux_len * sizeof(*(ctx->aux)));
+
+    if (!ctx->sa || !ctx->aux)
+        goto fail_b;
+
+    size_t main_size_max = src_len + roundup(src_len, 64) / 8;
+    main_size_max += vbyte_size(main_size_max);
+    size_t ordinals_size_max = divup(src_len, 2);
+
+    if (!out_stream_alloc(&(ctx->main), main_size_max))
+        goto fail_b;
+
+    if (!out_stream_alloc(&(ctx->ordinals), ordinals_size_max))
+        goto fail_a;
+
+    *ctx_out = ctx;
+
+    return;
+
+fail_a:
+    out_stream_free(&(ctx->main));
+fail_b:
+    debug("Resource allocation failed");
+    free(ctx->sa);
+    free(ctx->aux);
+}
+
+void encode_ctx_fini(struct encode_ctx **ctx)
+{
+    free((*ctx)->sa);
+    free((*ctx)->aux);
+    out_stream_free(&((*ctx)->main));
+    out_stream_free(&((*ctx)->ordinals));
+    free(*ctx);
+    *ctx = NULL;
+}
+
 #define min_factor_offs 1
 #define min_factor_len 3
 
@@ -719,20 +727,11 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     increment_clock(st.mincost_time);
 #endif
 
-    struct io_stream main;
-    struct io_stream ordinals;
+    struct io_stream *main = &ctx->main;
+    struct io_stream *ordinals = &ctx->ordinals;
 
-    size_t main_size_max = src_len + roundup(src_len, 64) / 8;
-    main_size_max += vbyte_size(main_size_max);
-    size_t ordinals_size_max = divup(src_len, 2);
-
-    if (!out_stream_init(&main, main_size_max))
-        return 0;
-
-    if (!out_stream_init(&ordinals, ordinals_size_max)) {
-        out_stream_fini(&ordinals, NULL, 0, 0);
-        return 0;
-    }
+    out_stream_init(main);
+    out_stream_init(ordinals);
 
     size_t src_pos = 0;
     uint32_t prev_offs = 0;
@@ -742,23 +741,23 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
         uint32_t factor_len = (uint32_t)aux[1 + 5 * src_pos];
 
         if (!factor_len) {
-            write_bit(&main, 0);
+            write_bit(main, 0);
             assert(src_pos < src_len);
-            cpy_u8_tos(&main, src, src_pos++);
+            cpy_u8_tos(main, src, src_pos++);
         } else {
-            write_bit(&main, 1);
+            write_bit(main, 1);
             uint32_t factor_offs = (uint32_t)aux[0 + 5 * src_pos];
 
             assert(factor_offs <= src_pos);
 
             if (factor_offs == prev_offs) {
-                write_vnibble(&ordinals, (uint32_t)(ord - prev_ord));
+                write_vnibble(ordinals, (uint32_t)(ord - prev_ord));
                 prev_ord = ord;
             } else {
-                write_factor_offs(&main, factor_offs);
+                write_factor_offs(main, factor_offs);
             }
 
-            write_factor_len(&main, factor_len);
+            write_factor_len(main, factor_len);
             src_pos += factor_len;
 
             prev_offs = factor_offs;
@@ -766,18 +765,18 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
         }
     }
 
-    if (stream_len(&main) + stream_len(&ordinals) >= src_len + 18) {
-        out_stream_reset(&main);
-        out_stream_reset(&ordinals);
+    if (stream_len(main) + stream_len(ordinals) >= src_len + 18) {
+        out_stream_init(main);
+        out_stream_init(ordinals);
         src_pos = 0;
     }
 
-    write_bit(&main, 0);
-    write_vnibble(&ordinals, (uint32_t)(ord - prev_ord));
+    write_bit(main, 0);
+    write_vnibble(ordinals, (uint32_t)(ord - prev_ord));
 
     size_t dst_pos = 0;
-    dst_pos += out_stream_fini(&main, dst, dst_len, dst_pos);
-    dst_pos += out_stream_fini(&ordinals, dst, dst_len, dst_pos);
+    dst_pos += out_stream_fini(main, dst, dst_len, dst_pos);
+    dst_pos += out_stream_fini(ordinals, dst, dst_len, dst_pos);
 
     if (src_pos < src_len) {
         size_t copy_len = src_len - src_pos;

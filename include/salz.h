@@ -27,11 +27,23 @@ struct stats {
 extern struct stats *get_stats(void);
 #endif
 
+struct io_stream {
+    uint8_t *buf;
+    size_t buf_len;
+    size_t buf_pos;
+    uint64_t bits;
+    size_t bits_avail;
+    size_t bits_pos;
+};
+
 struct encode_ctx {
     int32_t *sa;
     size_t sa_len;
     int32_t *aux;
     size_t aux_len;
+
+    struct io_stream main;
+    struct io_stream ordinals;
 };
 
 extern void encode_ctx_init(struct encode_ctx **ctx, size_t src_len);
