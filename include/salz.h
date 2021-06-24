@@ -37,10 +37,10 @@ struct io_stream {
 };
 
 struct encode_ctx {
-    int32_t *sa;
-    size_t sa_len;
-    int32_t *aux;
-    size_t aux_len;
+    int32_t *aux1;
+    size_t aux1_len;
+    int32_t *aux2;
+    size_t aux2_len;
 
     struct io_stream main;
     struct io_stream ordinals;
