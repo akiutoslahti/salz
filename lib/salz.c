@@ -678,6 +678,27 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
         factor_len *= ((factor_len >= min_factor_len) &&
                        (factor_offs_bytesize(factor_offs) < factor_len));
 
+        if (factor_len) {
+            uint32_t psv_np = psv_nsv[0 + 2 * (src_pos + 1)];
+            uint32_t nsv_np = psv_nsv[1 + 2 * (src_pos + 1)];
+
+            lz_factor(&fctx, src, src_len, src_pos + 1, psv_np, nsv_np);
+
+            uint32_t psv_offs_np = (src_pos + 1) - fctx.psv;
+            uint32_t psv_len_np = fctx.psv_len;
+            uint32_t nsv_offs_np = (src_pos + 1) - fctx.nsv;
+            uint32_t nsv_len_np = fctx.nsv_len;
+
+            uint32_t factor_offs_np = (psv_len_np == nsv_len_np) * min(psv_offs_np, nsv_offs_np) +
+                                      (psv_len_np > nsv_len_np) * psv_offs_np +
+                                      (nsv_len_np > psv_len_np) * nsv_offs_np;
+
+            uint32_t factor_len_np = max(psv_len_np, nsv_len_np);
+            factor_len_np *= (factor_offs_bytesize(factor_offs_np) < factor_len_np);
+
+            factor_len *= (factor_len_np < factor_len + 2);
+        }
+
         if (!factor_len) {
             write_bit(main, 0);
             assert(src_pos < src_len);
