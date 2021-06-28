@@ -302,6 +302,13 @@ static void write_unary(struct io_stream *stream, uint32_t val)
     write_bit(stream, 1);
 }
 
+#ifdef ENABLE_STATS
+static size_t grk_bitsize(uint32_t val, size_t k)
+{
+    return (val >> k) + 1 + k;
+}
+#endif
+
 static uint32_t read_gr3(struct io_stream *stream)
 {
     return (read_unary(stream) << 3) | read_bits(stream, 3);
@@ -617,7 +624,11 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     }
 
     int32_t *sa = ctx->aux1;
-    int32_t *psv_nsv = ctx->aux2;
+    int32_t *aux = ctx->aux2;
+#ifdef ENABLE_STATS
+    int32_t *dist = ctx->aux1;
+    size_t dist_len = ctx->aux1_len;
+#endif
 
 #ifdef ENABLE_STATS
     start_clock();
@@ -636,8 +647,8 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     sa[src_len + 1] = -1;
     for (size_t top = 0, i = 1; i < src_len + 2; i++) {
         while (sa[top] > sa[i]) {
-            psv_nsv[0 + 2 * sa[top]] = sa[top - 1]; /* PSV */
-            psv_nsv[1 + 2 * sa[top]] = sa[i];       /* NSV */
+            aux[0 + 2 * sa[top]] = sa[top - 1]; /* PSV */
+            aux[1 + 2 * sa[top]] = sa[i];       /* NSV */
             top -= 1;
         }
         top += 1;
@@ -648,19 +659,18 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     increment_clock(st.psv_nsv_time);
 #endif
 
-    struct io_stream *main = &ctx->main;
-    out_stream_init(main);
-
     struct factor_ctx fctx;
     init_factor_ctx(&fctx);
 
-    size_t src_pos = 0;
-    write_bit(main, 0);
-    assert(src_pos < src_len);
-    cpy_u8_tos(main, src, src_pos++);
-    while (src_pos < src_len) {
-        int32_t psv = psv_nsv[0 + 2 * src_pos];
-        int32_t nsv = psv_nsv[1 + 2 * src_pos];
+#ifdef ENABLE_STATS
+    memset(dist, 0, dist_len * sizeof(*dist));
+    size_t factor_len_max = 0;
+#endif
+
+    aux[1 + 2 * 0] = 0;
+    for (size_t src_pos = 1; src_pos < src_len; ) {
+        int32_t psv = aux[0 + 2 * src_pos];
+        int32_t nsv = aux[1 + 2 * src_pos];
 
         lz_factor(&fctx, src, src_len, src_pos, psv, nsv);
 
@@ -678,6 +688,47 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
         factor_len *= ((factor_len >= min_factor_len) &&
                        (factor_offs_bytesize(factor_offs) < factor_len));
 
+        aux[0 + 2 * src_pos] = (int32_t)factor_offs;
+        aux[1 + 2 * src_pos] = (int32_t)factor_len;
+
+#ifdef ENABLE_STATS
+        dist[factor_len] += 1;
+        factor_len_max = max(factor_len_max, factor_len);
+#endif
+
+        src_pos += max(1, factor_len);
+    }
+
+#ifdef ENABLE_STATS
+    size_t gr_k = 0;
+    size_t cost = UINT_MAX;
+    for (size_t k = 0; ; k++) {
+        size_t alt_cost = 0;
+        for (size_t i = min_factor_len; i < factor_len_max + 1; i++)
+            alt_cost += dist[i] * grk_bitsize(i - min_factor_len, k);
+
+        if (alt_cost > cost)
+            break;
+
+        cost = alt_cost;
+        gr_k = k;
+    }
+
+    st.gr_k_max = max(st.gr_k_max, gr_k);
+#endif
+
+#ifdef ENABLE_STATS
+    increment_clock(st.factor_time);
+#endif
+
+    struct io_stream *main = &ctx->main;
+    out_stream_init(main);
+
+    size_t src_pos = 0;
+    while (src_pos < src_len) {
+        uint32_t factor_offs = (uint32_t)aux[0 + 2 * src_pos];
+        uint32_t factor_len = (uint32_t)aux[1 + 2 * src_pos];
+
         if (!factor_len) {
             write_bit(main, 0);
             assert(src_pos < src_len);
@@ -688,6 +739,10 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
             write_factor_offs(main, factor_offs);
             write_factor_len(main, factor_len);
             src_pos += factor_len;
+#ifdef ENABLE_STATS
+            st.gr3_size += grk_bitsize(factor_len - min_factor_len, 3);
+            st.gr_opt_size += grk_bitsize(factor_len - min_factor_len, gr_k);
+#endif
         }
     }
 

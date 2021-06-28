@@ -152,6 +152,12 @@ static int compress_fname(char *in_fname, char *out_fname,
             1.0 * st->sa_time / NS_IN_SEC, 1.0 * st->psv_nsv_time / NS_IN_SEC,
             1.0 * st->factor_time / NS_IN_SEC, 1.0 * st->mincost_time / NS_IN_SEC,
             1.0 * st->encode_time / NS_IN_SEC);
+    fprintf(stderr, "    GR_K max: %zu, GR3 codes: %zu, optimal GR codes: %zu, winner: %s\n",
+            st->gr_k_max,
+            st->gr3_size,
+            st->gr_opt_size,
+            st->gr3_size == st->gr_opt_size ? "tie" :
+                st->gr3_size < st->gr_opt_size ? "GR3" : "GR opt");
 #endif
 
 exit:
