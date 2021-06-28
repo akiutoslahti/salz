@@ -152,6 +152,12 @@ static int compress_fname(char *in_fname, char *out_fname,
             1.0 * st->sa_time / NS_IN_SEC, 1.0 * st->psv_nsv_time / NS_IN_SEC,
             1.0 * st->factor_time / NS_IN_SEC, 1.0 * st->mincost_time / NS_IN_SEC,
             1.0 * st->encode_time / NS_IN_SEC);
+    fprintf(stderr, "    VLQ_K max: %zu, Current codes: %zu, optimal VLQ codes: %zu, winner: %s\n",
+            st->vlq_k_max,
+            st->offs_size,
+            st->vlq_opt_size,
+            st->offs_size == st->vlq_opt_size ? "tie" :
+                st->offs_size < st->vlq_opt_size ? "current" : "VLQ opt");
 #endif
 
 exit:

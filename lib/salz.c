@@ -9,6 +9,7 @@
 
 #include <limits.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -302,6 +303,20 @@ static void write_unary(struct io_stream *stream, uint32_t val)
     write_bit(stream, 1);
 }
 
+#ifdef ENABLE_STATS
+static inline size_t vlqk_bitsize(uint32_t val, size_t k)
+{
+    size_t vlq_len = 1;
+
+    while (val >>= k) {
+        val -= 1;
+        vlq_len += 1;
+    }
+
+    return (k + 1) * vlq_len;
+}
+#endif
+
 static uint32_t read_gr3(struct io_stream *stream)
 {
     return (read_unary(stream) << 3) | read_bits(stream, 3);
@@ -520,6 +535,11 @@ static size_t factor_offs_bytesize(uint32_t val)
     return divup(8 + 4 * vnibble_size((val - min_factor_offs) >> 8), 8);
 }
 
+static size_t factor_offs_bitsize(uint32_t val)
+{
+    return 8 + 4 * vnibble_size((val - min_factor_offs) >> 8);
+}
+
 static uint32_t read_factor_offs(struct io_stream *stream)
 {
     return ((read_vnibble(stream) << 8) | read_u8(stream)) + min_factor_offs;
@@ -617,7 +637,11 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     }
 
     int32_t *sa = ctx->aux1;
-    int32_t *psv_nsv = ctx->aux2;
+    int32_t *aux = ctx->aux2;
+#ifdef ENABLE_STATS
+    int32_t *dist = ctx->aux1;
+    size_t dist_len = ctx->aux1_len;
+#endif
 
 #ifdef ENABLE_STATS
     start_clock();
@@ -636,8 +660,8 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     sa[src_len + 1] = -1;
     for (size_t top = 0, i = 1; i < src_len + 2; i++) {
         while (sa[top] > sa[i]) {
-            psv_nsv[0 + 2 * sa[top]] = sa[top - 1]; /* PSV */
-            psv_nsv[1 + 2 * sa[top]] = sa[i];       /* NSV */
+            aux[0 + 2 * sa[top]] = sa[top - 1]; /* PSV */
+            aux[1 + 2 * sa[top]] = sa[i];       /* NSV */
             top -= 1;
         }
         top += 1;
@@ -648,19 +672,18 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     increment_clock(st.psv_nsv_time);
 #endif
 
-    struct io_stream *main = &ctx->main;
-    out_stream_init(main);
-
     struct factor_ctx fctx;
     init_factor_ctx(&fctx);
 
-    size_t src_pos = 0;
-    write_bit(main, 0);
-    assert(src_pos < src_len);
-    cpy_u8_tos(main, src, src_pos++);
-    while (src_pos < src_len) {
-        int32_t psv = psv_nsv[0 + 2 * src_pos];
-        int32_t nsv = psv_nsv[1 + 2 * src_pos];
+#ifdef ENABLE_STATS
+    memset(dist, 0, dist_len * sizeof(*dist));
+    size_t factor_offs_max = 0;
+#endif
+
+    aux[1 + 2 * 0] = 0;
+    for (size_t src_pos = 1; src_pos < src_len; ) {
+        int32_t psv = aux[0 + 2 * src_pos];
+        int32_t nsv = aux[1 + 2 * src_pos];
 
         lz_factor(&fctx, src, src_len, src_pos, psv, nsv);
 
@@ -678,6 +701,47 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
         factor_len *= ((factor_len >= min_factor_len) &&
                        (factor_offs_bytesize(factor_offs) < factor_len));
 
+        aux[0 + 2 * src_pos] = (int32_t)factor_offs;
+        aux[1 + 2 * src_pos] = (int32_t)factor_len;
+
+#ifdef ENABLE_STATS
+        dist[factor_offs] += 1;
+        factor_offs_max = max(factor_offs_max, factor_offs);
+#endif
+
+        src_pos += max(1, factor_len);
+    }
+
+#ifdef ENABLE_STATS
+    size_t vlq_k = 1;
+    size_t cost = UINT_MAX;
+    for (size_t k = 1; ; k++) {
+        size_t alt_cost = 0;
+        for (size_t i = min_factor_offs; i < factor_offs_max + 1; i++)
+            alt_cost += dist[i] * (8 + vlqk_bitsize((i - min_factor_offs) >> 8, k));
+
+        if (alt_cost > cost)
+            break;
+
+        cost = alt_cost;
+        vlq_k = k;
+    }
+
+    st.vlq_k_max = max(st.vlq_k_max, vlq_k);
+#endif
+
+#ifdef ENABLE_STATS
+    increment_clock(st.factor_time);
+#endif
+
+    struct io_stream *main = &ctx->main;
+    out_stream_init(main);
+
+    size_t src_pos = 0;
+    while (src_pos < src_len) {
+        uint32_t factor_offs = (uint32_t)aux[0 + 2 * src_pos];
+        uint32_t factor_len = (uint32_t)aux[1 + 2 * src_pos];
+
         if (!factor_len) {
             write_bit(main, 0);
             assert(src_pos < src_len);
@@ -688,6 +752,10 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
             write_factor_offs(main, factor_offs);
             write_factor_len(main, factor_len);
             src_pos += factor_len;
+#ifdef ENABLE_STATS
+            st.offs_size += factor_offs_bitsize(factor_offs);
+            st.vlq_opt_size += 8 + vlqk_bitsize((factor_offs - min_factor_offs) >> 8, vlq_k);
+#endif
         }
     }
 

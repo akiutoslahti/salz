@@ -22,6 +22,10 @@ struct stats {
     uint64_t factor_time;
     uint64_t mincost_time;
     uint64_t encode_time;
+
+    size_t offs_size;
+    size_t vlq_opt_size;
+    size_t vlq_k_max;
 };
 
 extern struct stats *get_stats(void);
