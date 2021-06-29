@@ -501,19 +501,25 @@ void encode_ctx_init(struct encode_ctx **ctx_out, size_t src_len)
     ctx->aux2 = malloc(ctx->aux2_len * sizeof(*(ctx->aux2)));
 
     if (!ctx->aux1 || !ctx->aux2)
-        goto fail;
+        goto fail_b;
 
     size_t main_size_max = src_len + roundup(src_len, 64) / 8;
     main_size_max += vbyte_size(main_size_max);
+    size_t ordinals_size_max = divup(src_len, 2);
 
     if (!out_stream_alloc(&(ctx->main), main_size_max))
-        goto fail;
+        goto fail_b;
+
+    if (!out_stream_alloc(&(ctx->ordinals), ordinals_size_max))
+        goto fail_a;
 
     *ctx_out = ctx;
 
     return;
 
-fail:
+fail_a:
+    out_stream_free(&(ctx->main));
+fail_b:
     debug("Resource allocation failed");
     free(ctx->aux1);
     free(ctx->aux2);
@@ -524,6 +530,7 @@ void encode_ctx_fini(struct encode_ctx **ctx)
     free((*ctx)->aux1);
     free((*ctx)->aux2);
     out_stream_free(&((*ctx)->main));
+    out_stream_free(&((*ctx)->ordinals));
     free(*ctx);
     *ctx = NULL;
 }
@@ -627,7 +634,8 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
         ctx->aux2 == NULL ||
         ctx->aux1_len < src_len + 2 ||
         ctx->aux2_len < 2 * (src_len + 1) ||
-        ctx->main.buf == NULL) {
+        ctx->main.buf == NULL ||
+        ctx->ordinals.buf == NULL) {
         debug("Allocated resources are not enough");
         return 0;
     }
@@ -762,9 +770,15 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     struct io_stream *main = &ctx->main;
     out_stream_init(main);
 
+    struct io_stream *ordinals = &ctx->ordinals;
+    out_stream_init(ordinals);
+
     write_vnibble(main, gr_k);
 
     size_t src_pos = 0;
+    size_t prev_offs = 0;
+    size_t ord = 0;
+    size_t prev_ord = 0;
     factor_pos = 0;
     while (src_pos < src_len) {
         uint32_t factor_offs = (uint32_t)aux[0 + 2 * factor_pos];
@@ -778,9 +792,19 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
         } else {
             write_bit(main, 1);
             assert(factor_offs <= src_pos);
-            write_factor_offs(main, factor_offs);
+
+            if (unlikely(factor_offs == prev_offs)) {
+                write_vnibble(ordinals, (uint32_t)(ord - prev_ord));
+                prev_ord = ord;
+            } else {
+                write_factor_offs(main, factor_offs);
+            }
+
             write_factor_len(main, factor_len, gr_k);
             src_pos += factor_len;
+
+            prev_offs = factor_offs;
+            ord += 1;
         }
     }
 
@@ -791,13 +815,17 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
         cpy_u8_tos(main, src, src_pos++);
     }
 
-    if (stream_len(main) >= src_len + 9) {
+    if (stream_len(main) + stream_len(ordinals) >= src_len + 18) {
         out_stream_init(main);
+        out_stream_init(ordinals);
         src_pos = 0;
     }
 
+    write_vnibble(ordinals, (uint32_t)(ord - prev_ord));
+
     size_t dst_pos = 0;
     dst_pos += out_stream_fini(main, dst, dst_len, dst_pos);
+    dst_pos += out_stream_fini(ordinals, dst, dst_len, dst_pos);
 
     if (src_pos < src_len) {
         size_t copy_len = src_len - src_pos;
@@ -825,22 +853,38 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     size_t dst_pos = 0;
 
     struct io_stream main;
+    struct io_stream ordinals;
 
     src_pos += in_stream_init(&main, src, src_len, src_pos);
+    src_pos += in_stream_init(&ordinals, src, src_len, src_pos);
 
     size_t gr_k = read_vnibble(&main);
 
+    size_t prev_offs = 0;
+    size_t ord = 0;
+    size_t next_ord = read_vnibble(&ordinals);
     while (!stream_empty(&main)) {
         if (!read_bit(&main)) {
             assert(dst_pos < dst_len);
             cpy_u8_froms(&main, dst, dst_pos++);
         } else {
-            uint32_t factor_offs = read_factor_offs(&main);
+            uint32_t factor_offs;
+
+            if (unlikely(ord == next_ord)) {
+                factor_offs = prev_offs;
+                next_ord += read_vnibble(&ordinals);
+            } else {
+                factor_offs = read_factor_offs(&main);
+            }
+
             uint32_t factor_len = read_factor_len(&main, gr_k);
             assert(factor_offs <= dst_pos);
             assert(dst_pos + factor_len < dst_len + 1);
             cpy_factor(dst, dst_pos, factor_offs, factor_len);
             dst_pos += factor_len;
+
+            prev_offs = factor_offs;
+            ord += 1;
         }
     }
 
