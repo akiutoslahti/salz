@@ -515,11 +515,6 @@ void encode_ctx_fini(struct encode_ctx **ctx)
 #define min_factor_offs 1
 #define min_factor_len 3
 
-static size_t factor_offs_bytesize(uint32_t val)
-{
-    return divup(8 + 4 * vnibble_size((val - min_factor_offs) >> 8), 8);
-}
-
 static uint32_t read_factor_offs(struct io_stream *stream)
 {
     return ((read_vnibble(stream) << 8) | read_u8(stream)) + min_factor_offs;
@@ -675,8 +670,7 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
 
         uint32_t factor_len = max(psv_len, nsv_len);
 
-        factor_len *= ((factor_len >= min_factor_len) &&
-                       (factor_offs_bytesize(factor_offs) < factor_len));
+        factor_len *= (factor_len >= min_factor_len);
 
         if (!factor_len) {
             write_bit(main, 0);
