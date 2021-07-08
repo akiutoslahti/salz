@@ -43,7 +43,6 @@ struct encode_ctx {
     size_t aux2_len;
 
     struct io_stream main;
-    struct io_stream ordinals;
 };
 
 extern void encode_ctx_init(struct encode_ctx **ctx, size_t src_len);
