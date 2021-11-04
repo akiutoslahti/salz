@@ -793,7 +793,7 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
             write_bit(main, 1);
             assert(factor_offs <= src_pos);
 
-            if (unlikely(factor_offs == prev_offs)) {
+            if (factor_offs == prev_offs) {
                 write_vnibble(ordinals, (uint32_t)(ord - prev_ord));
                 prev_ord = ord;
             } else {
@@ -870,7 +870,7 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         } else {
             uint32_t factor_offs;
 
-            if (unlikely(ord == next_ord)) {
+            if (ord == next_ord) {
                 factor_offs = prev_offs;
                 next_ord += read_vnibble(&ordinals);
             } else {
