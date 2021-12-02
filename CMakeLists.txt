@@ -10,7 +10,7 @@ else()
     set(CMAKE_BUILD_TYPE "Release")
 endif()
 
-add_compile_options(-Wall -Werror -Wextra -pedantic)
+add_compile_options(-DENABLE_STATS -march=native -Wall -Werror -Wextra -pedantic)
 
 option(ENABLE_STATS "Enable stat collection on compression" OFF)
 if(ENABLE_STATS)

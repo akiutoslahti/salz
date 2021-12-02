@@ -14,6 +14,7 @@
 
 #include "salz.h"
 #include "vlc.h"
+#include "lcp_cmp.h"
 #include "libsais.h"
 
 #ifdef NDEBUG
@@ -544,23 +545,8 @@ static void write_factor_len(struct io_stream *stream, uint32_t val)
 static size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
         size_t pos1, size_t pos2)
 {
-    size_t len = common_len;
-
-    while (pos2 + len < text_len - 8 + 1) {
-        uint64_t val1 = read_u64(text, pos1 + len);
-        uint64_t val2 = read_u64(text, pos2 + len);
-        uint64_t diff = val1 ^ val2;
-
-        if (diff)
-            return len + (__builtin_ctzll(diff) >> 3);
-
-        len += 8;
-    }
-
-    while (pos2 + len < text_len && text[pos1 + len] == text[pos2 + len])
-        len += 1;
-
-    return len;
+    unused(common_len);
+    return lcp_cmp_single(text, text_len, pos1, pos2, 0);
 }
 
 struct factor_ctx {
@@ -648,16 +634,10 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     increment_clock(st.psv_nsv_time);
 #endif
 
-    struct io_stream *main = &ctx->main;
-    out_stream_init(main);
-
     struct factor_ctx fctx;
     init_factor_ctx(&fctx);
 
-    size_t src_pos = 0;
-    write_bit(main, 0);
-    assert(src_pos < src_len);
-    cpy_u8_tos(main, src, src_pos++);
+    size_t src_pos = 1;
     while (src_pos < src_len) {
         int32_t psv = psv_nsv[0 + 2 * src_pos];
         int32_t nsv = psv_nsv[1 + 2 * src_pos];
@@ -677,6 +657,27 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
 
         factor_len *= ((factor_len >= min_factor_len) &&
                        (factor_offs_bytesize(factor_offs) < factor_len));
+
+        psv_nsv[0 + 2 * src_pos] = factor_offs;
+        psv_nsv[1 + 2 * src_pos] = factor_len;
+
+        src_pos += max(1, factor_len);
+    }
+
+#ifdef ENABLE_STATS
+    increment_clock(st.factor_time);
+#endif
+
+    struct io_stream *main = &ctx->main;
+    out_stream_init(main);
+
+    src_pos = 0;
+    write_bit(main, 0);
+    assert(src_pos < src_len);
+    cpy_u8_tos(main, src, src_pos++);
+    while (src_pos < src_len) {
+        uint32_t factor_offs = psv_nsv[0 + 2 * src_pos];
+        uint32_t factor_len = psv_nsv[1 + 2 * src_pos];
 
         if (!factor_len) {
             write_bit(main, 0);
