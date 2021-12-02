@@ -14,6 +14,7 @@
 
 #include "salz.h"
 #include "vlc.h"
+#include "lcp_cmp.h"
 #include "libsais.h"
 
 #ifdef NDEBUG
@@ -559,23 +560,13 @@ static void write_factor_len(struct io_stream *stream, uint32_t val)
 static size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
         size_t pos1, size_t pos2)
 {
-    size_t len = common_len;
-
-    while (pos2 + len < text_len - 8 + 1) {
-        uint64_t val1 = read_u64(text, pos1 + len);
-        uint64_t val2 = read_u64(text, pos2 + len);
-        uint64_t diff = val1 ^ val2;
-
-        if (diff)
-            return len + (__builtin_ctzll(diff) >> 3);
-
-        len += 8;
-    }
-
-    while (pos2 + len < text_len && text[pos1 + len] == text[pos2 + len])
-        len += 1;
-
-    return len;
+//#define LCP_CMP_REDUCED
+#ifdef LCP_CMP_REDUCED
+    return lcp_cmp_single(text, text_len, pos1, pos2, common_len);
+#else
+    unused(common_len);
+    return lcp_cmp_single(text, text_len, pos1, pos2, 0);
+#endif
 }
 
 struct factor_ctx {

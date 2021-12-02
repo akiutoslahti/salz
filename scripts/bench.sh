@@ -13,6 +13,9 @@ git_target=$1
 
 script_path=$(dirname $(realpath $script))
 build_path=$script_path/../build-bench
+iters=1
+warmup_bs=20
+blocksizes=$(seq 15 27)
 
 if [ -z "$git_target" ]
 then
@@ -32,30 +35,51 @@ mkdir $build_path
 echo "3. Running cmake"
 cd $build_path
 cmake -DENABLE_STATS=On .. &> /dev/null
+#cmake .. &> /dev/null
 
 echo "4. Running make"
 make &> /dev/null
 cd ..
 
-echo -e "5. Running benchmarks\n"
 shift
+
+echo -n -e "5. Warming up for benchmarks"
+for (( i=1; i<=$iters; i++ ))
+do
+    echo -n -e " [$i/$iters]"
+    rm -f $build_path/out.salz $build_path/out.unsalz
+
+    sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
+    $build_path/programs/salz -b $warmup_bs $1 $build_path/out.salz &> /dev/null
+
+    sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
+    $build_path/programs/salz -d $build_path/out.salz $build_path/out.unsalz &> /dev/null
+    echo -n -e "\b\b\b\b\b\b"
+done
+
+echo ""
+
+echo -e "6. Benchmarking\n"
 for file in $@
 do
-    for bs in {15..27}
+    for bs in $blocksizes
     do
-        rm -f $build_path/out.salz $build_path/out.unsalz
+        for (( i=1; i<=$iters; i++ ))
+        do
+            rm -f $build_path/out.salz $build_path/out.unsalz
 
-        sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
-        echo -n "filename: $(basename $file), block size: $bs, "
-        $build_path/programs/salz -b $bs $file $build_path/out.salz
+            sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
+            echo -n "filename: $(basename $file), block size: $bs, "
+            $build_path/programs/salz -b $bs $file $build_path/out.salz
 
-        sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
-        echo -n "    "
-        $build_path/programs/salz -d $build_path/out.salz $build_path/out.unsalz
+            sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
+            echo -n "    "
+            $build_path/programs/salz -d $build_path/out.salz $build_path/out.unsalz
 
-        diff -q $file $build_path/out.unsalz
+            diff -q $file $build_path/out.unsalz
+        done
+        echo
     done
-    echo
 done
 
 echo "6. Cleaning up"
