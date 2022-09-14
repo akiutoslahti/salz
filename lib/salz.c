@@ -642,7 +642,7 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     start_clock();
 #endif
 
-    if (libsais(src, sa + 1, src_len, 0)) {
+    if (libsais(src, sa + 1, src_len, 0, NULL)) {
         debug("libsais failed");
         return 0;
     }
