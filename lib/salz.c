@@ -7,6 +7,18 @@
  * See file LICENSE or a copy at <https://opensource.org/licenses/MIT>.
  */
 
+/*
+ * References:
+ *   [1] Utoslahti, A. (2022). Practical Aspects of Implementing a Suffix
+ *       Array-based Lempel-Ziv Data Compressor [Master’s thesis, University
+ *       of Helsinki]. http://urn.fi/URN:NBN:fi:hulib-202206132325
+ *   [2] Kärkkäinen, J., Kempa, D., Puglisi, S.J. (2013). Linear Time
+ *       Lempel-Ziv Factorization: Simple, Fast, Small. In: Fischer, J.,
+ *       Sanders, P. (eds) Combinatorial Pattern Matching. CPM 2013.
+ *       Lecture Notes in Computer Science, vol 7922. Springer, Berlin,
+ *       Heidelberg. https://doi.org/10.1007/978-3-642-38905-4_19
+ */
+
 #include <errno.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -48,8 +60,7 @@
 #ifdef ENABLE_STATS
     struct stats st;
 
-    struct stats *get_stats(void)
-    {
+    struct stats *get_stats(void) {
         return &st;
     }
 
@@ -84,7 +95,7 @@ static void write_u8(struct io_stream *stream, uint8_t val)
     stream->buf[stream->buf_pos++] = val;
 }
 
-static uint64_t read_u64(uint8_t *src, size_t pos)
+static uint64_t read_u64(const uint8_t *src, size_t pos)
 {
     uint64_t val;
 
@@ -96,20 +107,6 @@ static uint64_t read_u64(uint8_t *src, size_t pos)
 static void write_u64(uint8_t *dst, size_t pos, uint64_t val)
 {
     memcpy(&dst[pos], &val, sizeof(val));
-}
-
-static void cpy_u8_froms(struct io_stream *stream, uint8_t *dst,
-        size_t dst_pos)
-{
-    assert(stream->buf_pos < stream->buf_len);
-    dst[dst_pos] = stream->buf[stream->buf_pos++];
-}
-
-static void cpy_u8_tos(struct io_stream *stream, uint8_t *src,
-        size_t src_pos)
-{
-    assert(stream->buf_pos < stream->buf_len);
-    stream->buf[stream->buf_pos++] = src[src_pos];
 }
 
 static const int inc1[8] = { 0, 1, 2, 1, 4, 4, 4, 4 };
@@ -461,8 +458,7 @@ static struct io_stream *enc_stream_create(size_t size)
         return NULL;
     memset(stream, 0, sizeof(*stream));
 
-    if ((stream->buf = malloc(size)) == NULL)
-    {
+    if ((stream->buf = malloc(size)) == NULL) {
         free(stream);
         return NULL;
     }
@@ -562,7 +558,7 @@ static void write_factor_len(struct io_stream *stream, uint32_t val)
     write_gr3(stream, val - min_factor_len);
 }
 
-static size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
+static size_t lcp_cmp(const uint8_t *text, size_t text_len, size_t common_len,
         size_t pos1, size_t pos2)
 {
     size_t len = common_len;
@@ -584,7 +580,7 @@ static size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
     return len;
 }
 
-static void lz_factor(struct factor_ctx *ctx, uint8_t *text,
+static void lz_factor(struct factor_ctx *ctx, const uint8_t *text,
         size_t text_len, size_t pos, int32_t psv, int32_t nsv)
 {
     size_t psv_len = 0;
@@ -606,7 +602,7 @@ static void lz_factor(struct factor_ctx *ctx, uint8_t *text,
     ctx->nsv_len = nsv_len;
 }
 
-int salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
+int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
         size_t dst_len, size_t *encoded_len)
 {
 #ifdef NDEBUG
@@ -620,6 +616,8 @@ int salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     struct io_stream *enc_stream = NULL;
     size_t enc_stream_capacity;
     struct factor_ctx *fctx = NULL;
+    size_t src_pos;
+    size_t dst_pos;
     int ret = 0;
 
     /*
@@ -627,35 +625,36 @@ int salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
      */
 
     sa_len = src_len + 2;
-    if ((sa = malloc(sa_len * sizeof(*sa))) == NULL)
-    {
+    if ((sa = malloc(sa_len * sizeof(*sa))) == NULL) {
         ret = ENOMEM;
         goto exit;
     }
 
     aux_len = 4 * (src_len + 1);
-    if ((aux = malloc(aux_len * sizeof(*aux))) == NULL)
-    {
-        ret = ENOMEM;
-        goto exit;
-    }
-
-    enc_stream_capacity = 5 + src_len + roundup(src_len, 64) / 8;
-    if ((enc_stream = enc_stream_create(enc_stream_capacity)) == NULL)
-    {
-        ret = ENOMEM;
-        goto exit;
-    }
-
-    if ((fctx = factor_ctx_create()) == NULL)
-    {
+    if ((aux = malloc(aux_len * sizeof(*aux))) == NULL) {
         ret = ENOMEM;
         goto exit;
     }
 
     /*
-     * Force 8 literals to the end of the stream so that it is safe
-     * to perform copying of factors 8 bytes at a time.
+     * We compute the limit of the final compressed size via a closed
+     * formula in order to eliminate buffer boundary checks when writing
+     * to encoding stream.
+     */
+    enc_stream_capacity = src_len + roundup(src_len, 64) / 8;
+    if ((enc_stream = enc_stream_create(enc_stream_capacity)) == NULL) {
+        ret = ENOMEM;
+        goto exit;
+    }
+
+    if ((fctx = factor_ctx_create()) == NULL) {
+        ret = ENOMEM;
+        goto exit;
+    }
+
+    /*
+     * Force last 8 bytes to be encoded as literals to make
+     * copying factors 8 bytes at a time safe.
      */
     src_len -= 8;
 
@@ -675,15 +674,15 @@ int salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 #endif
 
     /*
-     * Construct PSV/NSV array
+     * PSV/NSV array construction using only Suffix Array as described in [2].
      */
 
     sa[0] = -1;
     sa[src_len + 1] = -1;
     for (size_t top = 0, i = 1; i < src_len + 2; i++) {
         while (sa[top] > sa[i]) {
-            aux[0 + 4 * sa[top]] = sa[top - 1]; /* PSV */
-            aux[1 + 4 * sa[top]] = sa[i];       /* NSV */
+            aux[0 + 4 * sa[top]] = sa[top - 1];
+            aux[1 + 4 * sa[top]] = sa[i];
             top -= 1;
         }
         top += 1;
@@ -695,7 +694,8 @@ int salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 #endif
 
     /*
-     * Factorize all positions
+     * Fast and efficient Lempel-Ziv factorization of all text positions as
+     * described in Section 3.4 of [1].
      */
 
     /* Skip factorization of first position and force it to be a literal */
@@ -718,9 +718,12 @@ int salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 #endif
 
     /*
-     * Compute minimum-cost factorization
+     * Dynamic programming SSSP (Single Source Shortest Path) approach to
+     * optimizing the final encoded size of the Lempel-Ziv factorization
+     * of a text as described in Section 3.5.4 of [1].
      */
 
+    /* Nothing left to do when last position is reached */
     aux[2 + 4 * src_len] = 0;
     for (size_t src_pos = src_len - 1; src_pos; src_pos--) {
         int32_t factor_offs = 0;
@@ -765,20 +768,21 @@ int salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 #endif
 
     /*
-     * Emit encoding
+     * Encoding the produced Lempel-Ziv factorization using an encoding format
+     * described in Section 3.6.1 of [1].
      */
 
-    size_t src_pos = 0;
+    src_pos = 0;
     while (src_pos < src_len) {
         uint32_t factor_len = (uint32_t)aux[1 + 4 * src_pos];
         if (!factor_len) {
             write_bit(enc_stream, 0);
             assert(src_pos < src_len);
-            cpy_u8_tos(enc_stream, src, src_pos++);
+            write_u8(enc_stream, src[src_pos]);
+            src_pos += 1;
         } else {
             write_bit(enc_stream, 1);
             uint32_t factor_offs = (uint32_t)aux[0 + 4 * src_pos];
-            assert(factor_offs <= src_pos);
             write_factor_offs(enc_stream, factor_offs);
             write_factor_len(enc_stream, factor_len);
             src_pos += factor_len;
@@ -786,18 +790,20 @@ int salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     }
 
     /*
-     * Copy "forced" literals to the end of the stream
+     * Encode the bytes that were "forced" to be literals in the start.
      */
 
     src_len += 8;
     for (size_t i = 0; i < 8; i++) {
         write_bit(enc_stream, 0);
         assert(src_pos < src_len);
-        cpy_u8_tos(enc_stream, src, src_pos++);
+        write_u8(enc_stream, src[src_pos]);
+        src_pos += 1;
     }
 
     /*
-     * Reset output stream if encoded size exceeds uncompressed size
+     * Reset output stream if encoded size exceeds uncompressed size.
+     * The technique is described in detail in Section 3.6.3 of [1].
      */
 
     if (stream_len_get(enc_stream) >= src_len + 9) {
@@ -809,15 +815,16 @@ int salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
      * Finalize (flush) output stream
      */
 
-    size_t dst_pos = 0;
+    dst_pos = 0;
     dst_pos += enc_stream_fini(enc_stream, dst, dst_len, dst_pos);
 
     /*
      * In case the output stream was reset, copy the whole uncompressed
-     * data after the empty output stream.
+     * data after the empty output stream. The technique is described in
+     * detail in Section 3.6.3 of [1].
      */
 
-    if (src_pos < src_len) {
+    if (!src_pos) {
         size_t copy_len = src_len - src_pos;
         assert(dst_pos + copy_len < dst_len + 1);
         memcpy(&dst[dst_pos], &src[src_pos], copy_len);
@@ -847,29 +854,28 @@ int salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     unused(dst_len);
 #endif
 
-    struct io_stream main;
+    struct io_stream dec_stream;
     size_t src_pos = 0;
     size_t dst_pos = 0;
-    size_t written;
 
     /*
-     * Prepare for decoding
+     * Prepare to start decoding
      */
 
-    written = dec_stream_init(&main, src, src_len, src_pos);
-    src_pos += written;
+    src_pos = dec_stream_init(&dec_stream, src, src_len, src_pos);
 
     /*
      * Decode
      */
 
-    while (!stream_is_empty(&main)) {
-        if (!read_bit(&main)) {
+    while (!stream_is_empty(&dec_stream)) {
+        if (!read_bit(&dec_stream)) {
             assert(dst_pos < dst_len);
-            cpy_u8_froms(&main, dst, dst_pos++);
+            dst[dst_pos] = read_u8(&dec_stream);
+            dst_pos += 1;
         } else {
-            uint32_t factor_offs = read_factor_offs(&main);
-            uint32_t factor_len = read_factor_len(&main);
+            uint32_t factor_offs = read_factor_offs(&dec_stream);
+            uint32_t factor_len = read_factor_len(&dec_stream);
             assert(factor_offs <= dst_pos);
             assert(dst_pos + factor_len < dst_len + 1);
             cpy_factor(dst, dst_pos, factor_offs, factor_len);
