@@ -426,7 +426,7 @@ static size_t stream_len_get(struct io_stream *stream)
     return stream->buf_pos;
 }
 
-static size_t in_stream_init(struct io_stream *stream, uint8_t *src,
+static size_t dec_stream_init(struct io_stream *stream, uint8_t *src,
         size_t src_len, size_t src_pos)
 {
     size_t orig_pos = src_pos;
@@ -829,7 +829,7 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     increment_clock(st.encode_time);
 #endif
 
-    ret = (int)dst_pos;
+    ret = (int32_t)dst_pos;
 
 exit:
     factor_ctx_destroy(fctx);
@@ -840,7 +840,7 @@ exit:
     return ret;
 }
 
-uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
+int32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         size_t dst_len)
 {
 #ifdef NDEBUG
@@ -849,10 +849,19 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
     size_t src_pos = 0;
     size_t dst_pos = 0;
-
+    size_t written;
     struct io_stream main;
 
-    src_pos += in_stream_init(&main, src, src_len, src_pos);
+    /*
+     * Prepare for decoding
+     */
+
+    written = dec_stream_init(&main, src, src_len, src_pos);
+    src_pos += written;
+
+    /*
+     * Decode
+     */
 
     while (!stream_is_empty(&main)) {
         if (!read_bit(&main)) {
@@ -868,6 +877,10 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         }
     }
 
+    /*
+     * Copy possible uncompressed data stored after the input stream
+     */
+
     if (src_pos < src_len) {
         size_t copy_len = src_len - src_pos;
         assert(dst_pos + copy_len < dst_len + 1);
@@ -876,5 +889,5 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         dst_pos += copy_len;
     }
 
-    return (uint32_t)dst_pos;
+    return (int32_t)dst_pos;
 }
