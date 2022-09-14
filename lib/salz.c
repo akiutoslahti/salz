@@ -451,7 +451,7 @@ static size_t in_stream_init(struct io_stream *stream, uint8_t *src,
     return (src_pos + stream_size) - orig_pos;
 }
 
-static bool out_stream_alloc(struct io_stream *stream, size_t size)
+static bool out_stream_create(struct io_stream *stream, size_t size)
 {
     stream->buf = malloc(size);
 
@@ -463,7 +463,7 @@ static bool out_stream_alloc(struct io_stream *stream, size_t size)
     return true;
 }
 
-static void out_stream_free(struct io_stream *stream)
+static void out_stream_destroy(struct io_stream *stream)
 {
     free(stream->buf);
 }
@@ -573,8 +573,6 @@ static void lz_factor(struct factor_ctx *ctx, uint8_t *text,
     ctx->nsv_len = nsv_len;
 }
 
-#define last_literals 8
-
 int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         size_t dst_len)
 {
@@ -591,7 +589,10 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     struct factor_ctx fctx = { -1, 0, -1, 0 };
     int ret;
 
-    /* Allocate resources */
+    /*
+     * Allocate resources
+     */
+
     sa_len = src_len + 2;
     if ((sa = malloc(sa_len * sizeof(*sa))) == NULL)
     {
@@ -607,22 +608,29 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     }
 
     out_stream_capacity = 5 + src_len + roundup(src_len, 64) / 8;
-    if (!out_stream_alloc(&out_stream, out_stream_capacity))
+    if (!out_stream_create(&out_stream, out_stream_capacity))
     {
         ret = -ENOMEM;
         goto exit;
     }
 
-    /* Initialize resources */
+    /*
+     * Initialize resources
+     */
+
     out_stream_init(&out_stream);
 
+    /*
+     * Force 8 literals to the end of the stream so that it is safe
+     * to perform copying of factors 8 bytes at a time.
+     */
+    src_len -= 8;
 
 #ifdef ENABLE_STATS
     start_clock();
 #endif
 
-    src_len -= last_literals;
-
+    /* Construct suffix array */
     if (libsais(src, sa + 1, src_len, 0, NULL)) {
         debug("libsais failed");
         ret = -EFAULT;
@@ -632,6 +640,10 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 #ifdef ENABLE_STATS
     increment_clock(st.sa_time);
 #endif
+
+    /*
+     * Construct PSV/NSV array
+     */
 
     sa[0] = -1;
     sa[src_len + 1] = -1;
@@ -649,8 +661,13 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     increment_clock(st.psv_nsv_time);
 #endif
 
-    aux[1 + 4 * 0] = 0; /* First position must be a literal */
-    aux[3 + 4 * 0] = 0; /* First position must be a literal */
+    /*
+     * Factorize all positions
+     */
+
+    /* Skip factorization of first position and force it to be a literal */
+    aux[1 + 4 * 0] = 0;
+    aux[3 + 4 * 0] = 0;
     for (size_t src_pos = 1; src_pos < src_len; src_pos++) {
         int32_t psv = aux[0 + 4 * src_pos];
         int32_t nsv = aux[1 + 4 * src_pos];
@@ -666,6 +683,10 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 #ifdef ENABLE_STATS
     increment_clock(st.factor_time);
 #endif
+
+    /*
+     * Compute minimum-cost factorization
+     */
 
     aux[2 + 4 * src_len] = 0;
     for (size_t src_pos = src_len - 1; src_pos; src_pos--) {
@@ -710,6 +731,10 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     increment_clock(st.mincost_time);
 #endif
 
+    /*
+     * Emit encoding
+     */
+
     size_t src_pos = 0;
     while (src_pos < src_len) {
         uint32_t factor_len = (uint32_t)aux[1 + 4 * src_pos];
@@ -727,20 +752,37 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         }
     }
 
-    src_len += last_literals;
-    for (size_t i = 0; i < last_literals; i++) {
+    /*
+     * Copy "forced" literals to the end of the stream
+     */
+
+    src_len += 8;
+    for (size_t i = 0; i < 8; i++) {
         write_bit(&out_stream, 0);
         assert(src_pos < src_len);
         cpy_u8_tos(&out_stream, src, src_pos++);
     }
+
+    /*
+     * Reset output stream if encoded size exceeds uncompressed size
+     */
 
     if (stream_len(&out_stream) >= src_len + 9) {
         out_stream_init(&out_stream);
         src_pos = 0;
     }
 
+    /*
+     * Finalize (flush) output stream
+     */
+
     size_t dst_pos = 0;
     dst_pos += out_stream_fini(&out_stream, dst, dst_len, dst_pos);
+
+    /*
+     * In case the output stream was reset, copy the whole uncompressed
+     * data after the empty output stream.
+     */
 
     if (src_pos < src_len) {
         size_t copy_len = src_len - src_pos;
@@ -759,7 +801,7 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 exit:
     free(sa);
     free(aux);
-    out_stream_free(&out_stream);
+    out_stream_destroy(&out_stream);
 
     return ret;
 }
