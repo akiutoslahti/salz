@@ -17,22 +17,6 @@
 #include "vlc.h"
 #include "libsais.h"
 
-struct io_stream {
-    uint8_t *buf;
-    size_t buf_len;
-    size_t buf_pos;
-    uint64_t bits;
-    size_t bits_avail;
-    size_t bits_pos;
-};
-
-struct factor_ctx {
-    int32_t psv;
-    size_t psv_len;
-    int32_t nsv;
-    size_t nsv_len;
-};
-
 #ifdef NDEBUG
 #   ifndef assert
 #       define assert(condition) do {} while(0)
@@ -78,6 +62,15 @@ struct factor_ctx {
             time_ns = get_time_ns();        \
         } while (0)
 #endif
+
+struct io_stream {
+    uint8_t *buf;
+    size_t buf_len;
+    size_t buf_pos;
+    uint64_t bits;
+    size_t bits_avail;
+    size_t bits_pos;
+};
 
 static uint8_t read_u8(struct io_stream *stream)
 {
@@ -423,12 +416,12 @@ static void write_vnibble(struct io_stream *stream, uint32_t val)
     write_bits(stream, nibbles, nibbles_len * 4);
 }
 
-static bool stream_empty(struct io_stream *stream)
+static bool stream_is_empty(struct io_stream *stream)
 {
     return stream->buf_pos == stream->buf_len;
 }
 
-static size_t stream_len(struct io_stream *stream)
+static size_t stream_len_get(struct io_stream *stream)
 {
     return stream->buf_pos;
 }
@@ -451,24 +444,7 @@ static size_t in_stream_init(struct io_stream *stream, uint8_t *src,
     return (src_pos + stream_size) - orig_pos;
 }
 
-static bool out_stream_create(struct io_stream *stream, size_t size)
-{
-    stream->buf = malloc(size);
-
-    if (!stream->buf)
-        return false;
-
-    stream->buf_len = size;
-
-    return true;
-}
-
-static void out_stream_destroy(struct io_stream *stream)
-{
-    free(stream->buf);
-}
-
-static void out_stream_init(struct io_stream *stream)
+static void enc_stream_init(struct io_stream *stream)
 {
     assert(field_sizeof(struct io_stream, bits) < stream->buf_len + 1);
     stream->buf_pos = field_sizeof(struct io_stream, bits);
@@ -477,7 +453,35 @@ static void out_stream_init(struct io_stream *stream)
     stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
 }
 
-static size_t out_stream_fini(struct io_stream *stream, uint8_t *dst,
+static struct io_stream *enc_stream_create(size_t size)
+{
+    struct io_stream *stream;
+
+    if ((stream = malloc(sizeof(*stream))) == NULL)
+        return NULL;
+    memset(stream, 0, sizeof(*stream));
+
+    if ((stream->buf = malloc(size)) == NULL)
+    {
+        free(stream);
+        return NULL;
+    }
+
+    stream->buf_len = size;
+    enc_stream_init(stream);
+
+    return stream;
+}
+
+static void enc_stream_destroy(struct io_stream *stream)
+{
+    if (stream == NULL)
+        return;
+    free(stream->buf);
+    free(stream);
+}
+
+static size_t enc_stream_fini(struct io_stream *stream, uint8_t *dst,
         size_t dst_len, size_t dst_pos)
 {
     size_t orig_pos = dst_pos;
@@ -493,6 +497,35 @@ static size_t out_stream_fini(struct io_stream *stream, uint8_t *dst,
     }
 
     return dst_pos - orig_pos;
+}
+
+struct factor_ctx {
+    int32_t psv;
+    size_t psv_len;
+    int32_t nsv;
+    size_t nsv_len;
+};
+
+static struct factor_ctx *factor_ctx_create(void)
+{
+    struct factor_ctx *ctx;
+
+    if ((ctx = malloc(sizeof(*ctx))) == NULL)
+        return NULL;
+
+    ctx->psv = -1;
+    ctx->psv_len = 0;
+    ctx->nsv = -1;
+    ctx->nsv_len = 0;
+
+    return ctx;
+}
+
+static void factor_ctx_destroy(struct factor_ctx *ctx)
+{
+    if (ctx == NULL)
+        return;
+    free(ctx);
 }
 
 #define min_factor_offs 1
@@ -584,10 +617,10 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     size_t sa_len;
     int32_t *aux = NULL;
     size_t aux_len;
-    struct io_stream out_stream = { NULL, 0, 0, 0, 0, 0 };
-    size_t out_stream_capacity;
-    struct factor_ctx fctx = { -1, 0, -1, 0 };
-    int ret;
+    struct io_stream *enc_stream = NULL;
+    size_t enc_stream_capacity;
+    struct factor_ctx *fctx = NULL;
+    int ret = 0;
 
     /*
      * Allocate resources
@@ -607,18 +640,18 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         goto exit;
     }
 
-    out_stream_capacity = 5 + src_len + roundup(src_len, 64) / 8;
-    if (!out_stream_create(&out_stream, out_stream_capacity))
+    enc_stream_capacity = 5 + src_len + roundup(src_len, 64) / 8;
+    if ((enc_stream = enc_stream_create(enc_stream_capacity)) == NULL)
     {
         ret = -ENOMEM;
         goto exit;
     }
 
-    /*
-     * Initialize resources
-     */
-
-    out_stream_init(&out_stream);
+    if ((fctx = factor_ctx_create()) == NULL)
+    {
+        ret = -ENOMEM;
+        goto exit;
+    }
 
     /*
      * Force 8 literals to the end of the stream so that it is safe
@@ -672,12 +705,12 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         int32_t psv = aux[0 + 4 * src_pos];
         int32_t nsv = aux[1 + 4 * src_pos];
 
-        lz_factor(&fctx, src, src_len, src_pos, psv, nsv);
+        lz_factor(fctx, src, src_len, src_pos, psv, nsv);
 
-        aux[0 + 4 * src_pos] = (int32_t)(src_pos - fctx.psv);
-        aux[1 + 4 * src_pos] = (int32_t)fctx.psv_len;
-        aux[2 + 4 * src_pos] = (int32_t)(src_pos - fctx.nsv);
-        aux[3 + 4 * src_pos] = (int32_t)fctx.nsv_len;
+        aux[0 + 4 * src_pos] = (int32_t)(src_pos - fctx->psv);
+        aux[1 + 4 * src_pos] = (int32_t)fctx->psv_len;
+        aux[2 + 4 * src_pos] = (int32_t)(src_pos - fctx->nsv);
+        aux[3 + 4 * src_pos] = (int32_t)fctx->nsv_len;
     }
 
 #ifdef ENABLE_STATS
@@ -739,15 +772,15 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     while (src_pos < src_len) {
         uint32_t factor_len = (uint32_t)aux[1 + 4 * src_pos];
         if (!factor_len) {
-            write_bit(&out_stream, 0);
+            write_bit(enc_stream, 0);
             assert(src_pos < src_len);
-            cpy_u8_tos(&out_stream, src, src_pos++);
+            cpy_u8_tos(enc_stream, src, src_pos++);
         } else {
-            write_bit(&out_stream, 1);
+            write_bit(enc_stream, 1);
             uint32_t factor_offs = (uint32_t)aux[0 + 4 * src_pos];
             assert(factor_offs <= src_pos);
-            write_factor_offs(&out_stream, factor_offs);
-            write_factor_len(&out_stream, factor_len);
+            write_factor_offs(enc_stream, factor_offs);
+            write_factor_len(enc_stream, factor_len);
             src_pos += factor_len;
         }
     }
@@ -758,17 +791,17 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
     src_len += 8;
     for (size_t i = 0; i < 8; i++) {
-        write_bit(&out_stream, 0);
+        write_bit(enc_stream, 0);
         assert(src_pos < src_len);
-        cpy_u8_tos(&out_stream, src, src_pos++);
+        cpy_u8_tos(enc_stream, src, src_pos++);
     }
 
     /*
      * Reset output stream if encoded size exceeds uncompressed size
      */
 
-    if (stream_len(&out_stream) >= src_len + 9) {
-        out_stream_init(&out_stream);
+    if (stream_len_get(enc_stream) >= src_len + 9) {
+        enc_stream_init(enc_stream);
         src_pos = 0;
     }
 
@@ -777,7 +810,7 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
      */
 
     size_t dst_pos = 0;
-    dst_pos += out_stream_fini(&out_stream, dst, dst_len, dst_pos);
+    dst_pos += enc_stream_fini(enc_stream, dst, dst_len, dst_pos);
 
     /*
      * In case the output stream was reset, copy the whole uncompressed
@@ -799,9 +832,10 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     ret = (int)dst_pos;
 
 exit:
-    free(sa);
+    factor_ctx_destroy(fctx);
+    enc_stream_destroy(enc_stream);
     free(aux);
-    out_stream_destroy(&out_stream);
+    free(sa);
 
     return ret;
 }
@@ -820,7 +854,7 @@ uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
     src_pos += in_stream_init(&main, src, src_len, src_pos);
 
-    while (!stream_empty(&main)) {
+    while (!stream_is_empty(&main)) {
         if (!read_bit(&main)) {
             assert(dst_pos < dst_len);
             cpy_u8_froms(&main, dst, dst_pos++);
