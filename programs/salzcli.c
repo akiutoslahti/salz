@@ -115,25 +115,29 @@ static int compress_fname(char *in_fname, char *out_fname,
 
     while ((read_len = fread(src_buf, 1, src_len, in_stream)) != 0) {
         in_fsize += read_len;
-        int32_t rc = salz_encode_default(src_buf, read_len, dst_buf, dst_len);
+        size_t encoded_len;
+        int rc;
 
-        if (rc <= 0) {
+        rc = salz_encode_default(src_buf, read_len, dst_buf, dst_len,
+                                 &encoded_len);
+
+        if (rc != 0) {
             /* @TODO add error ? */
             goto fail;
         }
 
-        write_len = fwrite_vbyte(out_stream, rc);
+        write_len = fwrite_vbyte(out_stream, encoded_len);
         if (write_len == 0) {
             /* @TODO add error ? */
             goto fail;
         }
         out_fsize += write_len;
 
-        if (fwrite(dst_buf, 1, rc, out_stream) != (size_t)rc) {
+        if (fwrite(dst_buf, 1, encoded_len, out_stream) != encoded_len) {
             /* @TODO add error ? */
             goto fail;
         }
-        out_fsize += rc;
+        out_fsize += encoded_len;
     }
     clock = get_time_ns() - clock;
 
@@ -208,25 +212,29 @@ static int decompress_fname(char *in_fname, char *out_fname)
 
     clock = get_time_ns();
     while (fread_vbyte(in_stream, &read_size) != 0) {
+        size_t decoded_len;
+        int rc;
+
         if (read_size < src_len &&
             fread(src_buf, 1, read_size, in_stream) != read_size) {
             /* @TODO Add error ? */
             goto fail;
         }
 
-        int32_t rc = salz_decode_default(src_buf, read_size, dst_buf, dst_len);
+        rc = salz_decode_default(src_buf, read_size, dst_buf, dst_len,
+                                 &decoded_len);
 
-        if (rc <= 0) {
+        if (rc != 0) {
             /* @TODO Add error ? */
             goto fail;
         }
 
-        if (fwrite(dst_buf, 1, rc, out_stream) != (size_t)rc) {
+        if (fwrite(dst_buf, 1, decoded_len, out_stream) != decoded_len) {
             /* @TODO Add error ? */
             goto fail;
         }
 
-        out_fsize += rc;
+        out_fsize += decoded_len;
     }
     clock = get_time_ns() - clock;
 

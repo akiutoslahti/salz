@@ -606,8 +606,8 @@ static void lz_factor(struct factor_ctx *ctx, uint8_t *text,
     ctx->nsv_len = nsv_len;
 }
 
-int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
-        size_t dst_len)
+int salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
+        size_t dst_len, size_t *encoded_len)
 {
 #ifdef NDEBUG
     unused(dst_len);
@@ -629,27 +629,27 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     sa_len = src_len + 2;
     if ((sa = malloc(sa_len * sizeof(*sa))) == NULL)
     {
-        ret = -ENOMEM;
+        ret = ENOMEM;
         goto exit;
     }
 
     aux_len = 4 * (src_len + 1);
     if ((aux = malloc(aux_len * sizeof(*aux))) == NULL)
     {
-        ret = -ENOMEM;
+        ret = ENOMEM;
         goto exit;
     }
 
     enc_stream_capacity = 5 + src_len + roundup(src_len, 64) / 8;
     if ((enc_stream = enc_stream_create(enc_stream_capacity)) == NULL)
     {
-        ret = -ENOMEM;
+        ret = ENOMEM;
         goto exit;
     }
 
     if ((fctx = factor_ctx_create()) == NULL)
     {
-        ret = -ENOMEM;
+        ret = ENOMEM;
         goto exit;
     }
 
@@ -664,9 +664,9 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 #endif
 
     /* Construct suffix array */
-    if (libsais(src, sa + 1, src_len, 0, NULL)) {
+    if (libsais(src, sa + 1, src_len, 0, NULL) != 0) {
         debug("libsais failed");
-        ret = -EFAULT;
+        ret = EFAULT;
         goto exit;
     }
 
@@ -829,7 +829,7 @@ int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
     increment_clock(st.encode_time);
 #endif
 
-    ret = (int32_t)dst_pos;
+    *encoded_len = dst_pos;
 
 exit:
     factor_ctx_destroy(fctx);
@@ -840,17 +840,17 @@ exit:
     return ret;
 }
 
-int32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
-        size_t dst_len)
+int salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
+        size_t dst_len, size_t *decoded_len)
 {
 #ifdef NDEBUG
     unused(dst_len);
 #endif
 
+    struct io_stream main;
     size_t src_pos = 0;
     size_t dst_pos = 0;
     size_t written;
-    struct io_stream main;
 
     /*
      * Prepare for decoding
@@ -889,5 +889,7 @@ int32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         dst_pos += copy_len;
     }
 
-    return (int32_t)dst_pos;
+    *decoded_len = dst_pos;
+
+    return 0;
 }
