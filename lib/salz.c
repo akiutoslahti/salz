@@ -7,6 +7,7 @@
  * See file LICENSE or a copy at <https://opensource.org/licenses/MIT>.
  */
 
+#include <errno.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -15,6 +16,22 @@
 #include "salz.h"
 #include "vlc.h"
 #include "libsais.h"
+
+struct io_stream {
+    uint8_t *buf;
+    size_t buf_len;
+    size_t buf_pos;
+    uint64_t bits;
+    size_t bits_avail;
+    size_t bits_pos;
+};
+
+struct factor_ctx {
+    int32_t psv;
+    size_t psv_len;
+    int32_t nsv;
+    size_t nsv_len;
+};
 
 #ifdef NDEBUG
 #   ifndef assert
@@ -26,10 +43,9 @@
 #   include <stdio.h>
 #   define debug(...)                       \
         do {                                \
-            fprintf(stderr, "(%s:%d) - ",   \
+            fprintf(stderr, "(%s:%d) - "    \
+                    __VA_ARGS__ "\n",       \
                     __func__, __LINE__);    \
-            fprintf(stderr, __VA_ARGS__);   \
-            fprintf(stderr, "\n");          \
         } while (0)
 #endif
 
@@ -479,49 +495,6 @@ static size_t out_stream_fini(struct io_stream *stream, uint8_t *dst,
     return dst_pos - orig_pos;
 }
 
-void encode_ctx_init(struct encode_ctx **ctx_out, size_t src_len)
-{
-    *ctx_out = NULL;
-
-    struct encode_ctx *ctx = malloc(sizeof(*ctx));
-
-    if (!ctx)
-        return;
-
-    ctx->aux1_len = 1 * (src_len + 2);
-    ctx->aux2_len = 4 * (src_len + 1);
-
-    ctx->aux1 = malloc(ctx->aux1_len * sizeof(*(ctx->aux1)));
-    ctx->aux2 = malloc(ctx->aux2_len * sizeof(*(ctx->aux2)));
-
-    if (!ctx->aux1 || !ctx->aux2)
-        goto fail;
-
-    size_t main_size_max = src_len + roundup(src_len, 64) / 8;
-    main_size_max += vbyte_size(main_size_max);
-
-    if (!out_stream_alloc(&(ctx->main), main_size_max))
-        goto fail;
-
-    *ctx_out = ctx;
-
-    return;
-
-fail:
-    debug("Resource allocation failed");
-    free(ctx->aux1);
-    free(ctx->aux2);
-}
-
-void encode_ctx_fini(struct encode_ctx **ctx)
-{
-    free((*ctx)->aux1);
-    free((*ctx)->aux2);
-    out_stream_free(&((*ctx)->main));
-    free(*ctx);
-    *ctx = NULL;
-}
-
 #define min_factor_offs 1
 #define min_factor_len 3
 
@@ -578,21 +551,6 @@ static size_t lcp_cmp(uint8_t *text, size_t text_len, size_t common_len,
     return len;
 }
 
-struct factor_ctx {
-    int32_t psv;
-    size_t psv_len;
-    int32_t nsv;
-    size_t nsv_len;
-};
-
-static void init_factor_ctx(struct factor_ctx *ctx)
-{
-    ctx->psv = -1;
-    ctx->psv_len = 0;
-    ctx->nsv = -1;
-    ctx->nsv_len = 0;
-}
-
 static void lz_factor(struct factor_ctx *ctx, uint8_t *text,
         size_t text_len, size_t pos, int32_t psv, int32_t nsv)
 {
@@ -617,34 +575,58 @@ static void lz_factor(struct factor_ctx *ctx, uint8_t *text,
 
 #define last_literals 8
 
-uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
-        size_t src_len, uint8_t *dst, size_t dst_len)
+int32_t salz_encode_default(uint8_t *src, size_t src_len, uint8_t *dst,
+        size_t dst_len)
 {
 #ifdef NDEBUG
     unused(dst_len);
 #endif
 
-    src_len -= last_literals;
+    int32_t *sa = NULL;
+    size_t sa_len;
+    int32_t *aux = NULL;
+    size_t aux_len;
+    struct io_stream out_stream = { NULL, 0, 0, 0, 0, 0 };
+    size_t out_stream_capacity;
+    struct factor_ctx fctx = { -1, 0, -1, 0 };
+    int ret;
 
-    if (ctx->aux1 == NULL ||
-        ctx->aux2 == NULL ||
-        ctx->aux1_len < 1 * (src_len + 2) ||
-        ctx->aux2_len < 4 * (src_len + 1) ||
-        ctx->main.buf == NULL) {
-        debug("Allocated resources are not enough");
-        return 0;
+    /* Allocate resources */
+    sa_len = src_len + 2;
+    if ((sa = malloc(sa_len * sizeof(*sa))) == NULL)
+    {
+        ret = -ENOMEM;
+        goto exit;
     }
 
-    int32_t *sa = ctx->aux1;
-    int32_t *aux = ctx->aux2;
+    aux_len = 4 * (src_len + 1);
+    if ((aux = malloc(aux_len * sizeof(*aux))) == NULL)
+    {
+        ret = -ENOMEM;
+        goto exit;
+    }
+
+    out_stream_capacity = 5 + src_len + roundup(src_len, 64) / 8;
+    if (!out_stream_alloc(&out_stream, out_stream_capacity))
+    {
+        ret = -ENOMEM;
+        goto exit;
+    }
+
+    /* Initialize resources */
+    out_stream_init(&out_stream);
+
 
 #ifdef ENABLE_STATS
     start_clock();
 #endif
 
+    src_len -= last_literals;
+
     if (libsais(src, sa + 1, src_len, 0, NULL)) {
         debug("libsais failed");
-        return 0;
+        ret = -EFAULT;
+        goto exit;
     }
 
 #ifdef ENABLE_STATS
@@ -666,9 +648,6 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
 #ifdef ENABLE_STATS
     increment_clock(st.psv_nsv_time);
 #endif
-
-    struct factor_ctx fctx;
-    init_factor_ctx(&fctx);
 
     aux[1 + 4 * 0] = 0; /* First position must be a literal */
     aux[3 + 4 * 0] = 0; /* First position must be a literal */
@@ -731,40 +710,37 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     increment_clock(st.mincost_time);
 #endif
 
-    struct io_stream *main = &ctx->main;
-    out_stream_init(main);
-
     size_t src_pos = 0;
     while (src_pos < src_len) {
         uint32_t factor_len = (uint32_t)aux[1 + 4 * src_pos];
         if (!factor_len) {
-            write_bit(main, 0);
+            write_bit(&out_stream, 0);
             assert(src_pos < src_len);
-            cpy_u8_tos(main, src, src_pos++);
+            cpy_u8_tos(&out_stream, src, src_pos++);
         } else {
-            write_bit(main, 1);
+            write_bit(&out_stream, 1);
             uint32_t factor_offs = (uint32_t)aux[0 + 4 * src_pos];
             assert(factor_offs <= src_pos);
-            write_factor_offs(main, factor_offs);
-            write_factor_len(main, factor_len);
+            write_factor_offs(&out_stream, factor_offs);
+            write_factor_len(&out_stream, factor_len);
             src_pos += factor_len;
         }
     }
 
     src_len += last_literals;
     for (size_t i = 0; i < last_literals; i++) {
-        write_bit(main, 0);
+        write_bit(&out_stream, 0);
         assert(src_pos < src_len);
-        cpy_u8_tos(main, src, src_pos++);
+        cpy_u8_tos(&out_stream, src, src_pos++);
     }
 
-    if (stream_len(main) >= src_len + 9) {
-        out_stream_init(main);
+    if (stream_len(&out_stream) >= src_len + 9) {
+        out_stream_init(&out_stream);
         src_pos = 0;
     }
 
     size_t dst_pos = 0;
-    dst_pos += out_stream_fini(main, dst, dst_len, dst_pos);
+    dst_pos += out_stream_fini(&out_stream, dst, dst_len, dst_pos);
 
     if (src_pos < src_len) {
         size_t copy_len = src_len - src_pos;
@@ -778,7 +754,14 @@ uint32_t salz_encode_default(struct encode_ctx *ctx, uint8_t *src,
     increment_clock(st.encode_time);
 #endif
 
-    return (uint32_t)dst_pos;
+    ret = (int)dst_pos;
+
+exit:
+    free(sa);
+    free(aux);
+    out_stream_free(&out_stream);
+
+    return ret;
 }
 
 uint32_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,

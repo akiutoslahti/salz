@@ -83,8 +83,6 @@ static int compress_fname(char *in_fname, char *out_fname,
     int ret = 0;
     uint64_t clock;
 
-    struct encode_ctx *ctx;
-
     block_size = 1 << log2_block_size;
     src_len = block_size;
     /* @TODO formulate maximum compressed size better */
@@ -102,9 +100,8 @@ static int compress_fname(char *in_fname, char *out_fname,
 
     src_buf = malloc(src_len);
     dst_buf = malloc(dst_len);
-    encode_ctx_init(&ctx, src_len);
 
-    if (src_buf == NULL || dst_buf == NULL || ctx == NULL)
+    if (src_buf == NULL || dst_buf == NULL)
         goto fail;
 
     clock = get_time_ns();
@@ -118,26 +115,25 @@ static int compress_fname(char *in_fname, char *out_fname,
 
     while ((read_len = fread(src_buf, 1, src_len, in_stream)) != 0) {
         in_fsize += read_len;
-        uint32_t encoded_len = salz_encode_default(ctx, src_buf, read_len,
-                                                   dst_buf, dst_len);
+        int rc = salz_encode_default(src_buf, read_len, dst_buf, dst_len);
 
-        if (encoded_len == 0) {
+        if (rc < 0) {
             /* @TODO add error ? */
             goto fail;
         }
 
-        write_len = fwrite_vbyte(out_stream, encoded_len);
+        write_len = fwrite_vbyte(out_stream, rc);
         if (write_len == 0) {
             /* @TODO add error ? */
             goto fail;
         }
         out_fsize += write_len;
 
-        if (fwrite(dst_buf, 1, encoded_len, out_stream) != encoded_len) {
+        if (fwrite(dst_buf, 1, rc, out_stream) != (size_t)rc) {
             /* @TODO add error ? */
             goto fail;
         }
-        out_fsize += encoded_len;
+        out_fsize += rc;
     }
     clock = get_time_ns() - clock;
 
@@ -161,7 +157,6 @@ exit:
         fclose(out_stream);
     free(src_buf);
     free(dst_buf);
-    encode_ctx_fini(&ctx);
 
     return ret;
 
