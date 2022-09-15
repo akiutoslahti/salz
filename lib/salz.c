@@ -183,6 +183,7 @@ static size_t write_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
     uint64_t vbyte;
     size_t vbyte_len = encode_vbyte_be(val, &vbyte);
 
+    /* @TODO Check the output buffer size */
     assert(pos + vbyte_len < buf_len + 1);
     memcpy(&buf[pos], &vbyte, vbyte_len);
 
@@ -487,6 +488,7 @@ static size_t enc_stream_fini(struct io_stream *stream, uint8_t *dst,
 
     if (dst) {
         dst_pos += write_vbyte(dst, dst_len, dst_pos, stream->buf_pos);
+        /* @TODO Check the output buffer size */
         assert(dst_pos + stream->buf_pos < dst_len + 1);
         memcpy(&dst[dst_pos], stream->buf, stream->buf_pos);
         dst_pos += stream->buf_pos;
@@ -605,10 +607,6 @@ static void lz_factor(struct factor_ctx *ctx, const uint8_t *text,
 int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
         size_t dst_len, size_t *encoded_len)
 {
-#ifdef NDEBUG
-    unused(dst_len);
-#endif
-
     int32_t *sa = NULL;
     size_t sa_len;
     int32_t *aux = NULL;
@@ -621,7 +619,7 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
     int ret = 0;
 
     /*
-     * Allocate resources
+     * Resource allocation
      */
 
     sa_len = src_len + 2;
@@ -637,9 +635,8 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
     }
 
     /*
-     * We compute the limit of the final compressed size via a closed
-     * formula in order to eliminate buffer boundary checks when writing
-     * to encoding stream.
+     * Determine the upper boundary for the final compressed size to eliminate
+     * buffer boundary checks when writing to the encoding stream.
      */
     enc_stream_capacity = src_len + roundup(src_len, 64) / 8;
     if ((enc_stream = enc_stream_create(enc_stream_capacity)) == NULL) {
@@ -662,7 +659,10 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
     start_clock();
 #endif
 
-    /* Construct suffix array */
+    /*
+     * Construction of Suffix Array
+     */
+
     if (libsais(src, sa + 1, src_len, 0, NULL) != 0) {
         debug("libsais failed");
         ret = EFAULT;
@@ -681,8 +681,8 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
     sa[src_len + 1] = -1;
     for (size_t top = 0, i = 1; i < src_len + 2; i++) {
         while (sa[top] > sa[i]) {
-            aux[0 + 4 * sa[top]] = sa[top - 1];
-            aux[1 + 4 * sa[top]] = sa[i];
+            aux[0 + 4 * sa[top]] = sa[top - 1]; /* PSV */
+            aux[1 + 4 * sa[top]] = sa[i]; /* NSV */
             top -= 1;
         }
         top += 1;
@@ -694,8 +694,8 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
 #endif
 
     /*
-     * Fast and efficient Lempel-Ziv factorization of all text positions as
-     * described in Section 3.4 of [1].
+     * Determining factor candidates for all text positions as described in
+     * Section 3.4 of [1].
      */
 
     /* Skip factorization of first position and force it to be a literal */
@@ -723,38 +723,43 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
      * of a text as described in Section 3.5.4 of [1].
      */
 
-    /* Nothing left to do when last position is reached */
+    /*
+     * Nothing left to do after reaching last position, initialize cost as zero
+     */
     aux[2 + 4 * src_len] = 0;
     for (size_t src_pos = src_len - 1; src_pos; src_pos--) {
+        /* Cost of using a literal */
         int32_t factor_offs = 0;
         int32_t factor_len = 0;
         int32_t cost = 9 + aux[2 + 4 * (src_pos + 1)];
 
-        int32_t len1 = aux[1 + 4 * src_pos];
-        if (len1 >= min_factor_len) {
-            int32_t offs1 = aux[0 + 4 * src_pos];
-            int32_t cost1 = 1 + factor_offs_bitsize(offs1) +
-                            factor_len_bitsize(len1) +
-                            aux[2 + 4 * (src_pos + len1)];
+        /* Cost of using PSV candidate */
+        int32_t alt_len = aux[1 + 4 * src_pos];
+        if (alt_len >= min_factor_len) {
+            int32_t alt_offs = aux[0 + 4 * src_pos];
+            int32_t alt_cost = 1 + factor_offs_bitsize(alt_offs) +
+                               factor_len_bitsize(alt_len) +
+                               aux[2 + 4 * (src_pos + alt_len)];
 
-            if (cost1 < cost) {
-                cost = cost1;
-                factor_offs = offs1;
-                factor_len = len1;
+            if (alt_cost < cost) {
+                cost = alt_cost;
+                factor_offs = alt_offs;
+                factor_len = alt_len;
             }
         }
 
-        int32_t len2 = aux[3 + 4 * src_pos];
-        if (len2 >= min_factor_len) {
-            int32_t offs2 = aux[2 + 4 * src_pos];
-            int32_t cost2 = 1 + factor_offs_bitsize(offs2) +
-                            factor_len_bitsize(len2) +
-                            aux[2 + 4 * (src_pos + len2)];
+        /* Cost of using NSV candidate */
+        alt_len = aux[3 + 4 * src_pos];
+        if (alt_len >= min_factor_len) {
+            int32_t alt_offs = aux[2 + 4 * src_pos];
+            int32_t alt_cost = 1 + factor_offs_bitsize(alt_offs) +
+                               factor_len_bitsize(alt_len) +
+                               aux[2 + 4 * (src_pos + alt_len)];
 
-            if (cost2 < cost) {
-                cost = cost2;
-                factor_offs = offs2;
-                factor_len = len2;
+            if (alt_cost < cost) {
+                cost = alt_cost;
+                factor_offs = alt_offs;
+                factor_len = alt_len;
             }
         }
 
@@ -769,18 +774,20 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
 
     /*
      * Encoding the produced Lempel-Ziv factorization using an encoding format
-     * described in Section 3.6.1 of [1].
+     * described in Sections 3.6.1 and 3.6.3 of [1].
      */
 
     src_pos = 0;
     while (src_pos < src_len) {
         uint32_t factor_len = (uint32_t)aux[1 + 4 * src_pos];
         if (!factor_len) {
+            /* Literal */
             write_bit(enc_stream, 0);
             assert(src_pos < src_len);
             write_u8(enc_stream, src[src_pos]);
             src_pos += 1;
         } else {
+            /* Factor */
             write_bit(enc_stream, 1);
             uint32_t factor_offs = (uint32_t)aux[0 + 4 * src_pos];
             write_factor_offs(enc_stream, factor_offs);
@@ -790,9 +797,8 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
     }
 
     /*
-     * Encode the bytes that were "forced" to be literals in the start.
+     * Encode the last 8 bytes that were "forced" to be literals in the start.
      */
-
     src_len += 8;
     for (size_t i = 0; i < 8; i++) {
         write_bit(enc_stream, 0);
@@ -802,8 +808,9 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
     }
 
     /*
-     * Reset output stream if encoded size exceeds uncompressed size.
-     * The technique is described in detail in Section 3.6.3 of [1].
+     * Handling of incompressible data pt. 1:
+     *   Reset the encoding stream if its size is greater than the original
+     *   uncompressed size.
      */
 
     if (stream_len_get(enc_stream) >= src_len + 9) {
@@ -812,20 +819,21 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
     }
 
     /*
-     * Finalize (flush) output stream
+     * Finalize (flush) the encoding stream
      */
 
     dst_pos = 0;
     dst_pos += enc_stream_fini(enc_stream, dst, dst_len, dst_pos);
 
     /*
-     * In case the output stream was reset, copy the whole uncompressed
-     * data after the empty output stream. The technique is described in
-     * detail in Section 3.6.3 of [1].
+     * Handling of incompressible data pt. 2:
+     *  Copy the original uncompressed data after the encoding stream that
+     *  was emptied in pt. 1.
      */
 
     if (!src_pos) {
         size_t copy_len = src_len - src_pos;
+        /* @TODO Check the output buffer size */
         assert(dst_pos + copy_len < dst_len + 1);
         memcpy(&dst[dst_pos], &src[src_pos], copy_len);
         src_pos += copy_len;
