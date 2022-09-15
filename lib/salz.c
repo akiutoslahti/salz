@@ -176,15 +176,12 @@ static size_t read_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
 static size_t write_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
         uint32_t val)
 {
-#ifdef NDEBUG
-    unused(buf_len);
-#endif
-
     uint64_t vbyte;
     size_t vbyte_len = encode_vbyte_be(val, &vbyte);
 
-    /* @TODO Check the output buffer size */
-    assert(pos + vbyte_len < buf_len + 1);
+    if (pos + vbyte_len > buf_len)
+        return 0;
+
     memcpy(&buf[pos], &vbyte, vbyte_len);
 
     return vbyte_len;
@@ -212,7 +209,7 @@ static void flush_bits(struct io_stream *stream)
 
 static uint8_t read_bit(struct io_stream *stream)
 {
-    if (!stream->bits_avail)
+    if (stream->bits_avail == 0)
         queue_bits(stream);
 
     uint8_t ret = !!(stream->bits & 0x8000000000000000u);
@@ -224,7 +221,7 @@ static uint8_t read_bit(struct io_stream *stream)
 
 static void write_bit(struct io_stream *stream, uint8_t bit)
 {
-    if (!stream->bits_avail)
+    if (stream->bits_avail == 0)
         flush_bits(stream);
 
     stream->bits = (stream->bits << 1) | bit;
@@ -235,7 +232,7 @@ static uint64_t read_bits(struct io_stream *stream, size_t count)
 {
     uint64_t ret = 0;
 
-    if (!stream->bits_avail)
+    if (stream->bits_avail == 0)
         queue_bits(stream);
 
     if (count > stream->bits_avail) {
@@ -254,7 +251,7 @@ static uint64_t read_bits(struct io_stream *stream, size_t count)
 
 static void write_bits(struct io_stream *stream, uint64_t bits, size_t count)
 {
-    if (!stream->bits_avail)
+    if (stream->bits_avail == 0)
         flush_bits(stream);
 
     if (count > stream->bits_avail) {
@@ -273,7 +270,7 @@ static void write_bits(struct io_stream *stream, uint64_t bits, size_t count)
 static void write_zeros(struct io_stream *stream, size_t count)
 {
     while (count) {
-        if (!stream->bits_avail)
+        if (stream->bits_avail == 0)
             flush_bits(stream);
 
         size_t write_count = min(stream->bits_avail, count);
@@ -285,12 +282,12 @@ static void write_zeros(struct io_stream *stream, size_t count)
 
 static uint32_t read_unary(struct io_stream *stream)
 {
-    if (!stream->bits_avail)
+    if (stream->bits_avail == 0)
         queue_bits(stream);
 
     uint32_t ret = 0;
 
-    while (!stream->bits) {
+    while (stream->bits == 0) {
         ret += stream->bits_avail;
 
         queue_bits(stream);
@@ -334,7 +331,7 @@ static uint8_t read_nibble(struct io_stream *stream)
 {
     uint8_t ret = 0;
 
-    if (!stream->bits_avail)
+    if (stream->bits_avail == 0)
         queue_bits(stream);
 
     if (stream->bits_avail < 4)
@@ -487,9 +484,17 @@ static size_t enc_stream_fini(struct io_stream *stream, uint8_t *dst,
     write_u64(stream->buf, stream->bits_pos, stream->bits);
 
     if (dst) {
-        dst_pos += write_vbyte(dst, dst_len, dst_pos, stream->buf_pos);
-        /* @TODO Check the output buffer size */
-        assert(dst_pos + stream->buf_pos < dst_len + 1);
+        size_t written;
+
+        written = write_vbyte(dst, dst_len, dst_pos, stream->buf_pos);
+        if (written == 0)
+            return 0;
+
+        dst_pos += written;
+
+        if (dst_pos + stream->buf_pos > dst_len)
+            return 0;
+
         memcpy(&dst[dst_pos], stream->buf, stream->buf_pos);
         dst_pos += stream->buf_pos;
     }
@@ -699,8 +704,8 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
      */
 
     /* Skip factorization of first position and force it to be a literal */
-    aux[1 + 4 * 0] = 0;
-    aux[3 + 4 * 0] = 0;
+    aux[1 + 4 * 0] = 1;
+    aux[3 + 4 * 0] = 1;
     for (size_t src_pos = 1; src_pos < src_len; src_pos++) {
         int32_t psv = aux[0 + 4 * src_pos];
         int32_t nsv = aux[1 + 4 * src_pos];
@@ -730,7 +735,7 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
     for (size_t src_pos = src_len - 1; src_pos; src_pos--) {
         /* Cost of using a literal */
         int32_t factor_offs = 0;
-        int32_t factor_len = 0;
+        int32_t factor_len = 1;
         int32_t cost = 9 + aux[2 + 4 * (src_pos + 1)];
 
         /* Cost of using PSV candidate */
@@ -780,20 +785,19 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
     src_pos = 0;
     while (src_pos < src_len) {
         uint32_t factor_len = (uint32_t)aux[1 + 4 * src_pos];
-        if (!factor_len) {
+        if (factor_len == 1) {
             /* Literal */
             write_bit(enc_stream, 0);
             assert(src_pos < src_len);
             write_u8(enc_stream, src[src_pos]);
-            src_pos += 1;
         } else {
             /* Factor */
             write_bit(enc_stream, 1);
             uint32_t factor_offs = (uint32_t)aux[0 + 4 * src_pos];
             write_factor_offs(enc_stream, factor_offs);
             write_factor_len(enc_stream, factor_len);
-            src_pos += factor_len;
         }
+        src_pos += factor_len;
     }
 
     /*
@@ -822,19 +826,24 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
      * Finalize (flush) the encoding stream
      */
 
-    dst_pos = 0;
-    dst_pos += enc_stream_fini(enc_stream, dst, dst_len, dst_pos);
-
+    dst_pos = enc_stream_fini(enc_stream, dst, dst_len, 0);
+    if (dst_pos == 0) {
+        ret = -1;
+        goto exit;
+    }
     /*
      * Handling of incompressible data pt. 2:
      *  Copy the original uncompressed data after the encoding stream that
      *  was emptied in pt. 1.
      */
 
-    if (!src_pos) {
+    if (src_pos == 0) {
         size_t copy_len = src_len - src_pos;
-        /* @TODO Check the output buffer size */
-        assert(dst_pos + copy_len < dst_len + 1);
+        if (dst_pos + copy_len > dst_len) {
+            ret = -1;
+            goto exit;
+        }
+
         memcpy(&dst[dst_pos], &src[src_pos], copy_len);
         src_pos += copy_len;
         dst_pos += copy_len;
@@ -877,11 +886,13 @@ int salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
      */
 
     while (!stream_is_empty(&dec_stream)) {
-        if (!read_bit(&dec_stream)) {
+        if (read_bit(&dec_stream) == 0) {
+            /* Literal */
             assert(dst_pos < dst_len);
             dst[dst_pos] = read_u8(&dec_stream);
             dst_pos += 1;
         } else {
+            /* Factor */
             uint32_t factor_offs = read_factor_offs(&dec_stream);
             uint32_t factor_len = read_factor_len(&dec_stream);
             assert(factor_offs <= dst_pos);
