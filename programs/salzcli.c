@@ -115,29 +115,25 @@ static int compress_fname(char *in_fname, char *out_fname,
 
     while ((read_len = fread(src_buf, 1, src_len, in_stream)) != 0) {
         in_fsize += read_len;
-        size_t encoded_len;
-        int rc;
+        size_t written = salz_encode_default(src_buf, read_len, dst_buf, dst_len);
 
-        rc = salz_encode_default(src_buf, read_len, dst_buf, dst_len,
-                                 &encoded_len);
-
-        if (rc != 0) {
+        if (written == 0) {
             /* @TODO add error ? */
             goto fail;
         }
 
-        write_len = fwrite_vbyte(out_stream, encoded_len);
+        write_len = fwrite_vbyte(out_stream, written);
         if (write_len == 0) {
             /* @TODO add error ? */
             goto fail;
         }
         out_fsize += write_len;
 
-        if (fwrite(dst_buf, 1, encoded_len, out_stream) != encoded_len) {
+        if (fwrite(dst_buf, 1, written, out_stream) != written) {
             /* @TODO add error ? */
             goto fail;
         }
-        out_fsize += encoded_len;
+        out_fsize += written;
     }
     clock = get_time_ns() - clock;
 
@@ -212,8 +208,7 @@ static int decompress_fname(char *in_fname, char *out_fname)
 
     clock = get_time_ns();
     while (fread_vbyte(in_stream, &read_size) != 0) {
-        size_t decoded_len;
-        int rc;
+        size_t written;
 
         if (read_size < src_len &&
             fread(src_buf, 1, read_size, in_stream) != read_size) {
@@ -221,20 +216,19 @@ static int decompress_fname(char *in_fname, char *out_fname)
             goto fail;
         }
 
-        rc = salz_decode_default(src_buf, read_size, dst_buf, dst_len,
-                                 &decoded_len);
+        written = salz_decode_default(src_buf, read_size, dst_buf, dst_len);
 
-        if (rc != 0) {
+        if (written == 0) {
             /* @TODO Add error ? */
             goto fail;
         }
 
-        if (fwrite(dst_buf, 1, decoded_len, out_stream) != decoded_len) {
+        if (fwrite(dst_buf, 1, written, out_stream) != written) {
             /* @TODO Add error ? */
             goto fail;
         }
 
-        out_fsize += decoded_len;
+        out_fsize += written;
     }
     clock = get_time_ns() - clock;
 

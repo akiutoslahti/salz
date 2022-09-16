@@ -27,10 +27,10 @@ struct stats {
 extern struct stats *get_stats(void);
 #endif
 
-extern int salz_encode_default(const uint8_t *src, size_t src_len,
-        uint8_t *dst, size_t dst_len, size_t *encoded_len);
+extern size_t salz_encode_default(const uint8_t *src, size_t src_len,
+        uint8_t *dst, size_t dst_len);
 
-extern int salz_decode_default(uint8_t *src, size_t src_len,
-        uint8_t *dst, size_t dst_len, size_t *decoded_len);
+extern size_t salz_decode_default(uint8_t *src, size_t src_len,
+        uint8_t *dst, size_t dst_len);
 
 #endif /* !SALZ_H */

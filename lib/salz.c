@@ -609,8 +609,8 @@ static void lz_factor(struct factor_ctx *ctx, const uint8_t *text,
     ctx->nsv_len = nsv_len;
 }
 
-int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
-        size_t dst_len, size_t *encoded_len)
+size_t salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
+        size_t dst_len)
 {
     int32_t *sa = NULL;
     size_t sa_len;
@@ -621,36 +621,30 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
     struct factor_ctx *fctx = NULL;
     size_t src_pos;
     size_t dst_pos;
-    int ret = 0;
+    size_t written = 0;
 
     /*
-     * Resource allocation
+     * @TODO Determine the size of smallest data chunk that can be encoded.
+     * Atleast if src_len <= 8 MUST fail
+     */
+
+    /*
+     * Allocate resources for encoding
      */
 
     sa_len = src_len + 2;
-    if ((sa = malloc(sa_len * sizeof(*sa))) == NULL) {
-        ret = ENOMEM;
-        goto exit;
-    }
-
     aux_len = 4 * (src_len + 1);
-    if ((aux = malloc(aux_len * sizeof(*aux))) == NULL) {
-        ret = ENOMEM;
-        goto exit;
-    }
-
     /*
      * Determine the upper boundary for the final compressed size to eliminate
      * buffer boundary checks when writing to the encoding stream.
      */
     enc_stream_capacity = src_len + roundup(src_len, 64) / 8;
-    if ((enc_stream = enc_stream_create(enc_stream_capacity)) == NULL) {
-        ret = ENOMEM;
-        goto exit;
-    }
 
-    if ((fctx = factor_ctx_create()) == NULL) {
-        ret = ENOMEM;
+    if ((sa = malloc(sa_len * sizeof(*sa))) == NULL ||
+        (aux = malloc(aux_len * sizeof(*aux))) == NULL ||
+        (enc_stream = enc_stream_create(enc_stream_capacity)) == NULL ||
+        (fctx = factor_ctx_create()) == NULL) {
+        debug("Couldn't allocate enough memory for encoding");
         goto exit;
     }
 
@@ -669,8 +663,7 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
      */
 
     if (libsais(src, sa + 1, src_len, 0, NULL) != 0) {
-        debug("libsais failed");
-        ret = EFAULT;
+        debug("Couldn't construct Suffix Array with 'libsais'");
         goto exit;
     }
 
@@ -828,9 +821,10 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
 
     dst_pos = enc_stream_fini(enc_stream, dst, dst_len, 0);
     if (dst_pos == 0) {
-        ret = -1;
+        debug("Couldn't write encoded data into 'dst' buf - not enough space");
         goto exit;
     }
+
     /*
      * Handling of incompressible data pt. 2:
      *  Copy the original uncompressed data after the encoding stream that
@@ -840,7 +834,8 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
     if (src_pos == 0) {
         size_t copy_len = src_len - src_pos;
         if (dst_pos + copy_len > dst_len) {
-            ret = -1;
+            debug("Couldn't write uncompressed data into 'dst' buf - "
+                  "not enough space");
             goto exit;
         }
 
@@ -853,7 +848,7 @@ int salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
     increment_clock(st.encode_time);
 #endif
 
-    *encoded_len = dst_pos;
+    written = dst_pos;
 
 exit:
     factor_ctx_destroy(fctx);
@@ -861,60 +856,80 @@ exit:
     free(aux);
     free(sa);
 
-    return ret;
+    return written;
 }
 
-int salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
-        size_t dst_len, size_t *decoded_len)
+size_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
+        size_t dst_len)
 {
 #ifdef NDEBUG
     unused(dst_len);
 #endif
 
     struct io_stream dec_stream;
-    size_t src_pos = 0;
-    size_t dst_pos = 0;
+    size_t src_pos;
+    size_t dst_pos;
+    size_t written = 0;
 
     /*
      * Prepare to start decoding
      */
 
+    src_pos = 0;
     src_pos = dec_stream_init(&dec_stream, src, src_len, src_pos);
 
     /*
      * Decode
      */
 
+    dst_pos = 0;
     while (!stream_is_empty(&dec_stream)) {
         if (read_bit(&dec_stream) == 0) {
             /* Literal */
-            assert(dst_pos < dst_len);
+            if (dst_pos > dst_len) {
+                debug("Couldn't write literal into 'dst' buf - "
+                      "not enough space");
+                goto exit;
+            }
             dst[dst_pos] = read_u8(&dec_stream);
             dst_pos += 1;
         } else {
             /* Factor */
             uint32_t factor_offs = read_factor_offs(&dec_stream);
             uint32_t factor_len = read_factor_len(&dec_stream);
-            assert(factor_offs <= dst_pos);
-            assert(dst_pos + factor_len < dst_len + 1);
+
+            if (factor_offs > dst_pos) {
+                debug("Decoding failed - input is malformed");
+                goto exit;
+            }
+            if (dst_pos + factor_len > dst_len) {
+                debug("Couldn't write factor into 'dst' buf - "
+                      "not enough space");
+                goto exit;
+            }
             cpy_factor(dst, dst_pos, factor_offs, factor_len);
             dst_pos += factor_len;
         }
     }
 
     /*
-     * Copy possible uncompressed data stored after the input stream
+     * Copy uncompressed data stored after the input stream (if any)
      */
 
     if (src_pos < src_len) {
         size_t copy_len = src_len - src_pos;
-        assert(dst_pos + copy_len < dst_len + 1);
+        if (dst_pos + copy_len > dst_len) {
+            debug("Couldn't write uncompressed data into 'dst' buf -"
+                  "not enough space");
+            goto exit;
+        }
         memcpy(&dst[dst_pos], &src[src_pos], copy_len);
         src_pos += copy_len;
         dst_pos += copy_len;
     }
 
-    *decoded_len = dst_pos;
+    written = dst_pos;
 
-    return 0;
+exit:
+    return written;
 }
