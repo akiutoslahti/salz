@@ -19,8 +19,7 @@
  *       Heidelberg. https://doi.org/10.1007/978-3-642-38905-4_19
  */
 
-#include <errno.h>
-#include <limits.h>
+#include <assert.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,32 +29,30 @@
 #include "libsais.h"
 
 #ifdef NDEBUG
-#   ifndef assert
-#       define assert(condition) do {} while(0)
-#   endif
-#   define debug(...) do {} while(0)
+#   define debug(fmt, ...) do {} while(0)
 #else
-#   include <assert.h>
 #   include <stdio.h>
-#   define debug(...)                       \
-        do {                                \
-            fprintf(stderr, "(%s:%d) - "    \
-                    __VA_ARGS__ "\n",       \
-                    __func__, __LINE__);    \
+#   define debug(fmt, ...)                              \
+        do {                                            \
+            fprintf(stderr, "(%s:%d) - " fmt "\n",      \
+                    __func__, __LINE__, ##__VA_ARGS__); \
         } while (0)
 #endif
 
 #define min(a, b) (((a) < (b)) ? (a) : (b))
-#define max(a, b) (((a) < (b)) ? (b) : (a))
 
 #define divup(a, b) (((a) + (b) - 1) / (b))
 #define roundup(a, b) (divup(a, b) * b)
 
-#define unused(var) ((void)var)
-
-#define array_len(arr) (sizeof(arr) / sizeof(arr[0]))
-
 #define field_sizeof(t, f) (sizeof(((t*)0)->f))
+
+#define unlikely(x) __builtin_expect((x),0)
+
+#ifdef __GNUC__
+#   define salz_memcpy(dst, src, n) __builtin_memcpy(dst, src, n)
+#else
+#   define salz_memcpy(dst, src, n) memcpy(dst, src, n)
+#endif
 
 #ifdef ENABLE_STATS
     struct stats st;
@@ -74,6 +71,15 @@
         } while (0)
 #endif
 
+enum salz_stream_type {
+    STREAM_TYPE_PLAIN = 0,
+    STREAM_TYPE_SALZ,
+    STREAM_TYPE_MAX,
+};
+
+#define TOKEN_TYPE_LITERAL (0)
+#define TOKEN_TYPE_FACTOR  (1)
+
 struct io_stream {
     uint8_t *buf;
     size_t buf_len;
@@ -83,117 +89,29 @@ struct io_stream {
     size_t bits_pos;
 };
 
-static uint8_t read_u8(struct io_stream *stream)
-{
-    assert(stream->buf_pos < stream->buf_len);
-    return stream->buf[stream->buf_pos++];
-}
-
 static void write_u8(struct io_stream *stream, uint8_t val)
 {
     assert(stream->buf_pos < stream->buf_len);
     stream->buf[stream->buf_pos++] = val;
 }
 
-static uint64_t read_u64(const uint8_t *src, size_t pos)
+static void write_u32(uint8_t *dst, size_t pos, uint32_t val)
+{
+    salz_memcpy(&dst[pos], &val, sizeof(val));
+}
+
+static uint64_t read_u64_unsafe(const uint8_t *src, size_t pos)
 {
     uint64_t val;
 
-    memcpy(&val, &src[pos], sizeof(val));
+    salz_memcpy(&val, &src[pos], sizeof(val));
 
     return val;
 }
 
 static void write_u64(uint8_t *dst, size_t pos, uint64_t val)
 {
-    memcpy(&dst[pos], &val, sizeof(val));
-}
-
-static const int inc1[8] = { 0, 1, 2, 1, 4, 4, 4, 4 };
-static const int inc2[8] = { 0, 1, 2, 2, 4, 3, 2, 1 };
-
-static void cpy_factor(uint8_t *buf, size_t pos, size_t offs, size_t len)
-{
-    uint8_t *src = &buf[pos - offs];
-    uint8_t *dst = &buf[pos];
-    uint8_t *end = dst + len;
-
-    if (offs < 8) {
-        dst[0] = src[0];
-        dst[1] = src[1];
-        dst[2] = src[2];
-        dst[3] = src[3];
-        memcpy(&dst[4], &src[inc1[offs]], 4);
-        src += inc2[offs];
-        dst += 8;
-    }
-
-    while (dst < end) {
-        memcpy(dst, src, 8);
-        dst += 8;
-        src += 8;
-    }
-}
-
-static size_t read_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
-        uint32_t *res)
-{
-#ifdef NDEBUG
-    unused(buf_len);
-#endif
-
-    assert(pos < buf_len);
-    uint8_t byte = buf[pos++];
-    *res = byte & 0x7fu;
-
-    if (byte >= 0x80u)
-        return 1;
-
-    assert(pos < buf_len);
-    byte = buf[pos++];
-    *res = ((*res + 1) << 7) | (byte & 0x7fu);
-    if (byte >= 0x80u)
-        return 2;
-
-    assert(pos < buf_len);
-    byte = buf[pos++];
-    *res = ((*res + 1) << 7) | (byte & 0x7fu);
-    if (byte >= 0x80u)
-        return 3;
-
-    assert(pos < buf_len);
-    byte = buf[pos++];
-    *res = ((*res + 1) << 7) | (byte & 0x7fu);
-    if (byte >= 0x80u)
-        return 4;
-
-    assert(pos < buf_len);
-    byte = buf[pos++];
-    *res = ((*res + 1) << 7) | (byte & 0x7fu);
-    return 5;
-}
-
-static size_t write_vbyte(uint8_t *buf, size_t buf_len, size_t pos,
-        uint32_t val)
-{
-    uint64_t vbyte;
-    size_t vbyte_len = encode_vbyte_be(val, &vbyte);
-
-    if (pos + vbyte_len > buf_len)
-        return 0;
-
-    memcpy(&buf[pos], &vbyte, vbyte_len);
-
-    return vbyte_len;
-}
-
-static void queue_bits(struct io_stream *stream)
-{
-    assert(stream->buf_pos + field_sizeof(struct io_stream, bits) <
-           stream->buf_len + 1);
-    stream->bits = read_u64(stream->buf, stream->buf_pos);
-    stream->buf_pos += field_sizeof(struct io_stream, bits);
-    stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
+    salz_memcpy(&dst[pos], &val, sizeof(val));
 }
 
 static void flush_bits(struct io_stream *stream)
@@ -207,18 +125,6 @@ static void flush_bits(struct io_stream *stream)
     stream->buf_pos += field_sizeof(struct io_stream, bits);
 }
 
-static uint8_t read_bit(struct io_stream *stream)
-{
-    if (stream->bits_avail == 0)
-        queue_bits(stream);
-
-    uint8_t ret = !!(stream->bits & 0x8000000000000000u);
-    stream->bits <<= 1;
-    stream->bits_avail -= 1;
-
-    return ret;
-}
-
 static void write_bit(struct io_stream *stream, uint8_t bit)
 {
     if (stream->bits_avail == 0)
@@ -226,27 +132,6 @@ static void write_bit(struct io_stream *stream, uint8_t bit)
 
     stream->bits = (stream->bits << 1) | bit;
     stream->bits_avail -= 1;
-}
-
-static uint64_t read_bits(struct io_stream *stream, size_t count)
-{
-    uint64_t ret = 0;
-
-    if (stream->bits_avail == 0)
-        queue_bits(stream);
-
-    if (count > stream->bits_avail) {
-        ret = stream->bits >> (64 - stream->bits_avail);
-        count -= stream->bits_avail;
-
-        queue_bits(stream);
-    }
-
-    ret = (ret << count) | (stream->bits >> (64 - count));
-    stream->bits <<= count;
-    stream->bits_avail -= count;
-
-    return ret;
 }
 
 static void write_bits(struct io_stream *stream, uint64_t bits, size_t count)
@@ -280,26 +165,6 @@ static void write_zeros(struct io_stream *stream, size_t count)
     }
 }
 
-static uint32_t read_unary(struct io_stream *stream)
-{
-    if (stream->bits_avail == 0)
-        queue_bits(stream);
-
-    uint32_t ret = 0;
-
-    while (stream->bits == 0) {
-        ret += stream->bits_avail;
-
-        queue_bits(stream);
-    }
-
-    uint32_t last_zeros = __builtin_clzll(stream->bits);
-    stream->bits <<= last_zeros + 1;
-    stream->bits_avail -= last_zeros + 1;
-
-    return ret + last_zeros;
-}
-
 static void write_unary(struct io_stream *stream, uint32_t val)
 {
     write_zeros(stream, val);
@@ -309,11 +174,6 @@ static void write_unary(struct io_stream *stream, uint32_t val)
 static size_t gr3_bitsize(uint32_t val)
 {
     return (val >> 3) + 1 + 3;
-}
-
-static uint32_t read_gr3(struct io_stream *stream)
-{
-    return (read_unary(stream) << 3) | read_bits(stream, 3);
 }
 
 static void write_gr3(struct io_stream *stream, uint32_t val)
@@ -327,81 +187,6 @@ static size_t vnibble_bitsize(uint32_t val)
     return 4 * vnibble_size(val);
 }
 
-static uint8_t read_nibble(struct io_stream *stream)
-{
-    uint8_t ret = 0;
-
-    if (stream->bits_avail == 0)
-        queue_bits(stream);
-
-    if (stream->bits_avail < 4)
-        return (uint8_t)read_bits(stream, 4);
-
-    ret = stream->bits >> 60;
-    stream->bits <<= 4;
-    stream->bits_avail -= 4;
-
-    return ret;
-}
-
-static uint32_t read_vnibble(struct io_stream *stream)
-{
-    uint8_t nibble = read_nibble(stream);
-    uint32_t ret = nibble & 0x7u;
-
-    if (nibble >= 0x8u)
-        return ret;
-
-    nibble = read_nibble(stream);
-    ret = ((ret + 1) << 3) | (nibble & 0x7u);
-    if (nibble >= 0x8u)
-        return ret;
-
-    nibble = read_nibble(stream);
-    ret = ((ret + 1) << 3) | (nibble & 0x7u);
-    if (nibble >= 0x8u)
-        return ret;
-
-    nibble = read_nibble(stream);
-    ret = ((ret + 1) << 3) | (nibble & 0x7u);
-    if (nibble >= 0x8u)
-        return ret;
-
-    nibble = read_nibble(stream);
-    ret = ((ret + 1) << 3) | (nibble & 0x7u);
-    if (nibble >= 0x8u)
-        return ret;
-
-    nibble = read_nibble(stream);
-    ret = ((ret + 1) << 3) | (nibble & 0x7u);
-    if (nibble >= 0x8u)
-        return ret;
-
-    nibble = read_nibble(stream);
-    ret = ((ret + 1) << 3) | (nibble & 0x7u);
-    if (nibble >= 0x8u)
-        return ret;
-
-    nibble = read_nibble(stream);
-    ret = ((ret + 1) << 3) | (nibble & 0x7u);
-    if (nibble >= 0x8u)
-        return ret;
-
-    nibble = read_nibble(stream);
-    ret = ((ret + 1) << 3) | (nibble & 0x7u);
-    if (nibble >= 0x8u)
-        return ret;
-
-    nibble = read_nibble(stream);
-    ret = ((ret + 1) << 3) | (nibble & 0x7u);
-    if (nibble >= 0x8u)
-        return ret;
-
-    nibble = read_nibble(stream);
-    ret = ((ret + 1) << 3) | (nibble & 0x7u);
-    return ret;
-}
-
 static void write_vnibble(struct io_stream *stream, uint32_t val)
 {
     uint64_t nibbles;
@@ -411,32 +196,9 @@ static void write_vnibble(struct io_stream *stream, uint32_t val)
     write_bits(stream, nibbles, nibbles_len * 4);
 }
 
-static bool stream_is_empty(struct io_stream *stream)
-{
-    return stream->buf_pos == stream->buf_len;
-}
-
 static size_t stream_len_get(struct io_stream *stream)
 {
     return stream->buf_pos;
-}
-
-static size_t dec_stream_init(struct io_stream *stream, uint8_t *src,
-        size_t src_len, size_t src_pos)
-{
-    size_t orig_pos = src_pos;
-
-    uint32_t stream_size;
-    src_pos += read_vbyte(src, src_len, src_pos, &stream_size);
-
-    assert(field_sizeof(struct io_stream, bits) < stream_size + 1);
-    stream->buf = &src[src_pos];
-    stream->buf_len = stream_size;
-    stream->buf_pos = field_sizeof(struct io_stream, bits);
-    stream->bits = read_u64(stream->buf, 0);
-    stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
-
-    return (src_pos + stream_size) - orig_pos;
 }
 
 static void enc_stream_init(struct io_stream *stream)
@@ -476,7 +238,7 @@ static void enc_stream_destroy(struct io_stream *stream)
 }
 
 static size_t enc_stream_fini(struct io_stream *stream, uint8_t *dst,
-        size_t dst_len, size_t dst_pos)
+    size_t dst_len, size_t dst_pos)
 {
     size_t orig_pos = dst_pos;
 
@@ -484,18 +246,16 @@ static size_t enc_stream_fini(struct io_stream *stream, uint8_t *dst,
     write_u64(stream->buf, stream->bits_pos, stream->bits);
 
     if (dst) {
-        size_t written;
-
-        written = write_vbyte(dst, dst_len, dst_pos, stream->buf_pos);
-        if (written == 0)
-            return 0;
-
-        dst_pos += written;
+        uint32_t stream_hdr = 0;
+        stream_hdr |= STREAM_TYPE_SALZ << 24;
+        stream_hdr |= stream->buf_pos & 0xffffff;
+        write_u32(dst, dst_pos, stream_hdr);
+        dst_pos += 4;
 
         if (dst_pos + stream->buf_pos > dst_len)
             return 0;
 
-        memcpy(&dst[dst_pos], stream->buf, stream->buf_pos);
+        salz_memcpy(&dst[dst_pos], stream->buf, stream->buf_pos);
         dst_pos += stream->buf_pos;
     }
 
@@ -539,11 +299,6 @@ static size_t factor_offs_bitsize(uint32_t val)
     return 8 + vnibble_bitsize((val - min_factor_offs) >> 8);
 }
 
-static uint32_t read_factor_offs(struct io_stream *stream)
-{
-    return ((read_vnibble(stream) << 8) | read_u8(stream)) + min_factor_offs;
-}
-
 static void write_factor_offs(struct io_stream *stream, uint32_t val)
 {
     write_vnibble(stream, (val - min_factor_offs) >> 8);
@@ -555,24 +310,19 @@ static size_t factor_len_bitsize(uint32_t val)
     return gr3_bitsize(val - min_factor_len);
 }
 
-static uint32_t read_factor_len(struct io_stream *stream)
-{
-    return read_gr3(stream) + min_factor_len;
-}
-
 static void write_factor_len(struct io_stream *stream, uint32_t val)
 {
     write_gr3(stream, val - min_factor_len);
 }
 
 static size_t lcp_cmp(const uint8_t *text, size_t text_len, size_t common_len,
-        size_t pos1, size_t pos2)
+    size_t pos1, size_t pos2)
 {
     size_t len = common_len;
 
     while (pos2 + len < text_len - 8 + 1) {
-        uint64_t val1 = read_u64(text, pos1 + len);
-        uint64_t val2 = read_u64(text, pos2 + len);
+        uint64_t val1 = read_u64_unsafe(text, pos1 + len);
+        uint64_t val2 = read_u64_unsafe(text, pos2 + len);
         uint64_t diff = val1 ^ val2;
 
         if (diff)
@@ -588,7 +338,7 @@ static size_t lcp_cmp(const uint8_t *text, size_t text_len, size_t common_len,
 }
 
 static void lz_factor(struct factor_ctx *ctx, const uint8_t *text,
-        size_t text_len, size_t pos, int32_t psv, int32_t nsv)
+    size_t text_len, size_t pos, int32_t psv, int32_t nsv)
 {
     size_t psv_len = 0;
     size_t nsv_len = 0;
@@ -610,7 +360,7 @@ static void lz_factor(struct factor_ctx *ctx, const uint8_t *text,
 }
 
 size_t salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
-        size_t dst_len)
+    size_t dst_len)
 {
     int32_t *sa = NULL;
     size_t sa_len;
@@ -804,44 +554,29 @@ size_t salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
         src_pos += 1;
     }
 
-    /*
-     * Handling of incompressible data pt. 1:
-     *   Reset the encoding stream if its size is greater than the original
-     *   uncompressed size.
-     */
-
+    dst_pos = 0;
     if (stream_len_get(enc_stream) >= src_len + 9) {
-        enc_stream_init(enc_stream);
-        src_pos = 0;
-    }
-
-    /*
-     * Finalize (flush) the encoding stream
-     */
-
-    dst_pos = enc_stream_fini(enc_stream, dst, dst_len, 0);
-    if (dst_pos == 0) {
-        debug("Couldn't write encoded data into 'dst' buf - not enough space");
-        goto exit;
-    }
-
-    /*
-     * Handling of incompressible data pt. 2:
-     *  Copy the original uncompressed data after the encoding stream that
-     *  was emptied in pt. 1.
-     */
-
-    if (src_pos == 0) {
-        size_t copy_len = src_len - src_pos;
-        if (dst_pos + copy_len > dst_len) {
+        uint32_t stream_hdr = 0;
+        stream_hdr |= STREAM_TYPE_PLAIN << 24;
+        stream_hdr |= src_len & 0xffffff;
+        write_u32(dst, dst_pos, stream_hdr);
+        dst_pos += 4;
+        if (dst_pos + src_len > dst_len) {
             debug("Couldn't write uncompressed data into 'dst' buf - "
                   "not enough space");
             goto exit;
         }
 
-        memcpy(&dst[dst_pos], &src[src_pos], copy_len);
-        src_pos += copy_len;
-        dst_pos += copy_len;
+        salz_memcpy(&dst[dst_pos], &src[src_pos], src_len);
+        src_pos += src_len;
+        dst_pos += dst_len;
+    }
+    else {
+        dst_pos += enc_stream_fini(enc_stream, dst, dst_len, dst_pos);
+        if (dst_pos == 0) {
+            debug("Couldn't write encoded data into 'dst' buf - not enough space");
+            goto exit;
+        }
     }
 
 #ifdef ENABLE_STATS
@@ -859,77 +594,426 @@ exit:
     return written;
 }
 
+struct salz_decode_ctx {
+    uint8_t stream_type;
+
+    uint8_t *src;
+    size_t src_len;
+    size_t src_pos;
+
+    uint8_t *dst;
+    size_t dst_len;
+    size_t dst_pos;
+
+    uint64_t bits;
+    size_t bits_avail;
+};
+
+typedef struct salz_decode_ctx salz_decode_ctx;
+
+static salz_decode_ctx *decode_ctx_init(uint8_t *src, size_t src_len,
+    uint8_t *dst, size_t dst_len)
+{
+    salz_decode_ctx *ctx;
+    uint32_t stream_hdr;
+    uint8_t stream_type;
+    size_t stream_len;
+
+    ctx = malloc(sizeof(*ctx));
+    memset(ctx, 0, sizeof(*ctx));
+
+    if (ctx == NULL) {
+        debug("Couldn't allocate memory (%zu bytes)", sizeof(*ctx));
+        return NULL;
+    }
+
+    if (src_len < 4) {
+        debug("Couldn't read stream header");
+        goto fail;
+    }
+
+    salz_memcpy(&stream_hdr, src, 4);
+    stream_type = stream_hdr >> 24;
+    stream_len = stream_hdr & 0xffffff;
+
+    if (stream_type >= STREAM_TYPE_MAX) {
+        debug("Unknown stream type (%u)", stream_type);
+        goto fail;
+    }
+
+    if (stream_len > src_len - 4) {
+        debug("Stream is truncated (expected: %zu, have: %zu)",
+               stream_len, src_len - 4);
+        goto fail;
+    }
+
+    ctx->stream_type = stream_type;
+    ctx->src = src + 4;
+    ctx->src_len = stream_len;
+    ctx->src_pos = 0;
+    ctx->dst = dst;
+    ctx->dst_len = dst_len;
+    ctx->dst_pos = 0;
+    ctx->bits = 0;
+    ctx->bits_avail = 0;
+
+    return ctx;
+
+fail:
+    free(ctx);
+    return NULL;
+}
+
+static void decode_ctx_fini(salz_decode_ctx *ctx)
+{
+    if (ctx != NULL)
+        free(ctx);
+}
+
+static bool stream_is_empty(salz_decode_ctx *ctx)
+{
+    return ctx->src_pos == ctx->src_len;
+}
+
+static bool cpy_plain_stream(salz_decode_ctx *ctx)
+{
+    if (ctx->dst_len - ctx->dst_pos < ctx->src_len - ctx->src_pos)
+        return false;
+
+    salz_memcpy(&ctx->dst[ctx->dst_pos],
+                &ctx->src[ctx->src_pos],
+                ctx->src_len - ctx->src_pos);
+
+    return true;
+}
+
+static bool read_u8(salz_decode_ctx *ctx, uint8_t *res)
+{
+    static_assert(sizeof(*res) == 1);
+
+    if (unlikely(ctx->src_pos + 1 > ctx->src_len))
+        return false;
+
+    *res = ctx->src[ctx->src_pos++];
+
+    return true;
+}
+
+static bool read_u64(salz_decode_ctx *ctx, uint64_t *res)
+{
+    static_assert(sizeof(*res) == 8);
+
+    if (unlikely(ctx->src_pos + 8 > ctx->src_len))
+        return false;
+
+    salz_memcpy(res, &ctx->src[ctx->src_pos], 8);
+    ctx->src_pos += 8;
+
+    return true;
+}
+
+static bool queue_bits(salz_decode_ctx *ctx)
+{
+    if (unlikely(!read_u64(ctx, &ctx->bits)))
+        return false;
+
+    ctx->bits_avail = 64;
+
+    return true;
+}
+
+static bool read_bit(salz_decode_ctx *ctx, uint8_t *res)
+{
+    if (ctx->bits_avail == 0 && unlikely(!queue_bits(ctx)))
+        return false;
+
+    *res = !!(ctx->bits & 0x8000000000000000u);
+    ctx->bits <<= 1;
+    ctx->bits_avail -= 1;
+
+    return true;
+}
+
+static bool read_bits(salz_decode_ctx *ctx, size_t count, uint64_t *res)
+{
+    assert(count <= 64);
+
+    if (ctx->bits_avail == 0 && unlikely(!queue_bits(ctx)))
+        return false;
+
+    if (count <= ctx->bits_avail) {
+        *res = ctx->bits >> (64 - count);
+        ctx->bits <<= count;
+        ctx->bits_avail -= count;
+        return true;
+    }
+
+    *res = ctx->bits >> (64 - ctx->bits_avail);
+    count -= ctx->bits_avail;
+
+    if (unlikely(!queue_bits(ctx)))
+        return false;
+
+    *res = (*res << count) | (ctx->bits >> (64 - count));
+    ctx->bits <<= count;
+    ctx->bits_avail -= count;
+
+    return true;
+}
+
+static bool read_unary(salz_decode_ctx *ctx, uint32_t *res)
+{
+    uint32_t last_zeros;
+
+    if (ctx->bits_avail == 0 && unlikely(!queue_bits(ctx)))
+        return false;
+
+    *res = 0;
+    while (ctx->bits == 0) {
+        *res += ctx->bits_avail;
+        if (!unlikely(queue_bits(ctx)))
+            return false;
+    }
+
+    last_zeros = __builtin_clzll(ctx->bits);
+    ctx->bits <<= last_zeros + 1;
+    ctx->bits_avail -= last_zeros + 1;
+
+    *res += last_zeros;
+
+    return true;
+}
+
+static bool read_gr3(salz_decode_ctx *ctx, uint32_t *res)
+{
+    uint32_t var;
+    uint64_t fixed;
+
+    if (unlikely(!read_unary(ctx, &var)))
+        return false;
+    if (unlikely(!read_bits(ctx, 3, &fixed)))
+        return false;
+
+    *res = (var << 3) | fixed;
+
+    return true;
+}
+
+static bool read_nibble(salz_decode_ctx *ctx, uint8_t *res)
+{
+    uint64_t var;
+
+    if (unlikely(!read_bits(ctx, 4, &var)))
+        return false;
+
+    *res = (uint8_t)var;
+
+    return true;
+}
+
+static bool read_vnibble(salz_decode_ctx *ctx, uint32_t *res)
+{
+    uint8_t nibble;
+
+    if (unlikely(!read_nibble(ctx, &nibble)))
+        return false;
+    *res = nibble & 0x7u;
+    if (nibble >= 0x8u)
+        return true;
+
+    if (unlikely(!read_nibble(ctx, &nibble)))
+        return false;
+    *res = ((*res + 1) << 3) | (nibble & 0x7u);
+    if (nibble >= 0x8u)
+        return true;
+
+    if (unlikely(!read_nibble(ctx, &nibble)))
+        return false;
+    *res = ((*res + 1) << 3) | (nibble & 0x7u);
+    if (nibble >= 0x8u)
+        return true;
+
+    if (unlikely(!read_nibble(ctx, &nibble)))
+        return false;
+    *res = ((*res + 1) << 3) | (nibble & 0x7u);
+    if (nibble >= 0x8u)
+        return true;
+
+    if (unlikely(!read_nibble(ctx, &nibble)))
+        return false;
+    *res = ((*res + 1) << 3) | (nibble & 0x7u);
+    if (nibble >= 0x8u)
+        return true;
+
+    if (unlikely(!read_nibble(ctx, &nibble)))
+        return false;
+    *res = ((*res + 1) << 3) | (nibble & 0x7u);
+    if (nibble >= 0x8u)
+        return true;
+
+    if (unlikely(!read_nibble(ctx, &nibble)))
+        return false;
+    *res = ((*res + 1) << 3) | (nibble & 0x7u);
+    if (nibble >= 0x8u)
+        return true;
+
+    if (unlikely(!read_nibble(ctx, &nibble)))
+        return false;
+    *res = ((*res + 1) << 3) | (nibble & 0x7u);
+    if (nibble >= 0x8u)
+        return true;
+
+    if (unlikely(!read_nibble(ctx, &nibble)))
+        return false;
+    *res = ((*res + 1) << 3) | (nibble & 0x7u);
+    if (nibble >= 0x8u)
+        return true;
+
+    if (unlikely(!read_nibble(ctx, &nibble)))
+        return false;
+    *res = ((*res + 1) << 3) | (nibble & 0x7u);
+    if (nibble >= 0x8u)
+        return true;
+
+    if (unlikely(!read_nibble(ctx, &nibble)))
+        return false;
+    *res = ((*res + 1) << 3) | (nibble & 0x7u);
+    return true;
+}
+
+static bool cpy_literal(salz_decode_ctx *ctx)
+{
+    if (unlikely(ctx->src_pos == ctx->src_len || ctx->dst_pos == ctx->dst_len))
+        return false;
+
+    ctx->dst[ctx->dst_pos++] = ctx->src[ctx->src_pos++];
+
+    return true;
+}
+
+static const int inc1[8] = { 0, 1, 2, 1, 4, 4, 4, 4 };
+static const int inc2[8] = { 0, 1, 2, 2, 4, 3, 2, 1 };
+
+static bool read_factor_offs(salz_decode_ctx *ctx, uint32_t *res)
+{
+    uint32_t var;
+    uint8_t fixed;
+
+    if (unlikely(!read_vnibble(ctx, &var)))
+        return false;
+    if (unlikely(!read_u8(ctx, &fixed)))
+        return false;
+
+    *res = ((var << 8) | fixed) + min_factor_offs;
+
+    return true;
+}
+
+static bool read_factor_len(salz_decode_ctx *ctx, uint32_t *res)
+{
+    if (unlikely(!read_gr3(ctx, res)))
+        return false;
+
+    *res += min_factor_len;
+
+    return true;
+}
+
+static bool cpy_factor(salz_decode_ctx *ctx)
+{
+    uint32_t factor_offs;
+    uint32_t factor_len;
+    uint8_t *src;
+    uint8_t *dst;
+    uint8_t *end;
+
+    if (unlikely(!read_factor_offs(ctx, &factor_offs)))
+        return false;
+    if (unlikely(!read_factor_len(ctx, &factor_len)))
+        return false;
+
+    if (unlikely(ctx->dst_pos + factor_len > ctx->dst_len))
+        return false;
+
+    dst = &ctx->dst[ctx->dst_pos];
+    src = dst - factor_offs;
+    end = dst + factor_len;
+
+    if (factor_offs < 8) {
+        dst[0] = src[0];
+        dst[1] = src[1];
+        dst[2] = src[2];
+        dst[3] = src[3];
+        salz_memcpy(&dst[4], &src[inc1[factor_offs]], 4);
+        src += inc2[factor_offs];
+        dst += 8;
+    }
+
+    while (dst < end) {
+        salz_memcpy(dst, src, 8);
+        dst += 8;
+        src += 8;
+    }
+
+    ctx->dst_pos += factor_len;
+
+    return true;
+}
+
 size_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
         size_t dst_len)
 {
-#ifdef NDEBUG
-    unused(dst_len);
-#endif
+    salz_decode_ctx *ctx = NULL;
+    size_t decoded_len = 0;
 
-    struct io_stream dec_stream;
-    size_t src_pos;
-    size_t dst_pos;
-    size_t written = 0;
-
-    /*
-     * Prepare to start decoding
-     */
-
-    src_pos = 0;
-    src_pos = dec_stream_init(&dec_stream, src, src_len, src_pos);
-
-    /*
-     * Decode
-     */
-
-    dst_pos = 0;
-    while (!stream_is_empty(&dec_stream)) {
-        if (read_bit(&dec_stream) == 0) {
-            /* Literal */
-            if (dst_pos > dst_len) {
-                debug("Couldn't write literal into 'dst' buf - "
-                      "not enough space");
-                goto exit;
-            }
-            dst[dst_pos] = read_u8(&dec_stream);
-            dst_pos += 1;
-        } else {
-            /* Factor */
-            uint32_t factor_offs = read_factor_offs(&dec_stream);
-            uint32_t factor_len = read_factor_len(&dec_stream);
-
-            if (factor_offs > dst_pos) {
-                debug("Decoding failed - input is malformed");
-                goto exit;
-            }
-            if (dst_pos + factor_len > dst_len) {
-                debug("Couldn't write factor into 'dst' buf - "
-                      "not enough space");
-                goto exit;
-            }
-            cpy_factor(dst, dst_pos, factor_offs, factor_len);
-            dst_pos += factor_len;
-        }
+    if (src == NULL || dst == NULL) {
+        debug("NULL I/O buffer(s)");
+        goto out;
     }
 
-    /*
-     * Copy uncompressed data stored after the input stream (if any)
-     */
-
-    if (src_pos < src_len) {
-        size_t copy_len = src_len - src_pos;
-        if (dst_pos + copy_len > dst_len) {
-            debug("Couldn't write uncompressed data into 'dst' buf -"
-                  "not enough space");
-            goto exit;
-        }
-        memcpy(&dst[dst_pos], &src[src_pos], copy_len);
-        src_pos += copy_len;
-        dst_pos += copy_len;
+    ctx = decode_ctx_init(src, src_len, dst, dst_len);
+    if (ctx == NULL) {
+        debug("Couldn't initialize decoding context");
+        goto out;
     }
 
-    written = dst_pos;
+    if (ctx->stream_type == STREAM_TYPE_PLAIN) {
+        if (!cpy_plain_stream(ctx)) {
+            debug("Couldn't copy plain stream");
+            goto out;
+        }
+    } else if (ctx->stream_type == STREAM_TYPE_SALZ) {
+        while (unlikely(!stream_is_empty(ctx))) {
+            uint8_t token;
 
-exit:
-    return written;
+            if (unlikely(!read_bit(ctx, &token))) {
+                debug("Couldn't read token");
+                goto out;
+            }
+
+            if (token == TOKEN_TYPE_LITERAL) {
+                if (unlikely(!cpy_literal(ctx))) {
+                    debug("Couldn't copy a literal");
+                    goto out;
+                }
+            } else if (token == TOKEN_TYPE_FACTOR) {
+                if (unlikely(!cpy_factor(ctx))) {
+                    debug("Couldn't copy a factor");
+                    goto out;
+                }
+            } else {
+                debug("Unexpected error");
+                goto out;
+            }
+        }
+    } else {
+        debug("Unexpected error");
+        goto out;
+    }
+
+    decoded_len = ctx->dst_pos;
+
+out:
+    decode_ctx_fini(ctx);
+    return decoded_len;
 }
