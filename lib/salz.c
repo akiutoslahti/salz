@@ -960,26 +960,27 @@ static bool cpy_factor(salz_decode_ctx *ctx)
     return true;
 }
 
-size_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
-        size_t dst_len)
+int salz_decode_safe(uint8_t *src, size_t src_len, uint8_t *dst,
+    size_t *dst_len)
 {
     salz_decode_ctx *ctx = NULL;
-    size_t decoded_len = 0;
+    int ret = 0;
 
     if (src == NULL || dst == NULL) {
         debug("NULL I/O buffer(s)");
-        goto out;
+        return -1;
     }
 
-    ctx = decode_ctx_init(src, src_len, dst, dst_len);
+    ctx = decode_ctx_init(src, src_len, dst, *dst_len);
     if (ctx == NULL) {
         debug("Couldn't initialize decoding context");
-        goto out;
+        return -1;
     }
 
     if (ctx->stream_type == STREAM_TYPE_PLAIN) {
         if (!cpy_plain_stream(ctx)) {
             debug("Couldn't copy plain stream");
+            ret = -1;
             goto out;
         }
     } else if (ctx->stream_type == STREAM_TYPE_SALZ) {
@@ -988,32 +989,37 @@ size_t salz_decode_default(uint8_t *src, size_t src_len, uint8_t *dst,
 
             if (unlikely(!read_bit(ctx, &token))) {
                 debug("Couldn't read token");
+                ret = -1;
                 goto out;
             }
 
             if (token == TOKEN_TYPE_LITERAL) {
                 if (unlikely(!cpy_literal(ctx))) {
                     debug("Couldn't copy a literal");
+                    ret = -1;
                     goto out;
                 }
             } else if (token == TOKEN_TYPE_FACTOR) {
                 if (unlikely(!cpy_factor(ctx))) {
                     debug("Couldn't copy a factor");
+                    ret = -1;
                     goto out;
                 }
             } else {
                 debug("Unexpected error");
+                ret = -1;
                 goto out;
             }
         }
     } else {
         debug("Unexpected error");
+        ret = -1;
         goto out;
     }
 
-    decoded_len = ctx->dst_pos;
+    *dst_len = ctx->dst_pos;
 
 out:
     decode_ctx_fini(ctx);
-    return decoded_len;
+    return ret;
 }
