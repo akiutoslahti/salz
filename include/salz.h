@@ -1,7 +1,7 @@
 /*
- * salz.h - Defines for SA based LZ compressor
+ * salz.h - Definitions for SA based LZ compressor
  *
- * Copyright (c) 2021 Aki Utoslahti. All rights reserved.
+ * Copyright (c) 2021-2023 Aki Utoslahti. All rights reserved.
  *
  * This work is distributed under terms of the MIT license.
  * See file LICENSE or a copy at <https://opensource.org/licenses/MIT>.
@@ -30,7 +30,7 @@ extern struct stats *get_stats(void);
 extern size_t salz_encode_default(const uint8_t *src, size_t src_len,
     uint8_t *dst, size_t dst_len);
 
-/**
+/*
  * Decode SALZ encoded segment
  *
  * @param[in]     src      SALZ encoded segment to decode

@@ -1,7 +1,7 @@
 /*
  * salz.c - SA based LZ compressor
  *
- * Copyright (c) 2021 Aki Utoslahti. All rights reserved.
+ * Copyright (c) 2021-2023 Aki Utoslahti. All rights reserved.
  *
  * This work is distributed under terms of the MIT license.
  * See file LICENSE or a copy at <https://opensource.org/licenses/MIT>.
@@ -597,16 +597,19 @@ exit:
 struct salz_decode_ctx {
     uint8_t stream_type;
 
+    /* SALZ encoded input */
     uint8_t *src;
     size_t src_len;
     size_t src_pos;
 
+    /* Buffered bitsream (interleaved synchronously with input) */
+    uint64_t bits;
+    size_t bits_avail;
+
+    /* Plain output */
     uint8_t *dst;
     size_t dst_len;
     size_t dst_pos;
-
-    uint64_t bits;
-    size_t bits_avail;
 };
 
 typedef struct salz_decode_ctx salz_decode_ctx;
@@ -614,18 +617,17 @@ typedef struct salz_decode_ctx salz_decode_ctx;
 static salz_decode_ctx *decode_ctx_init(uint8_t *src, size_t src_len,
     uint8_t *dst, size_t dst_len)
 {
-    salz_decode_ctx *ctx;
+    salz_decode_ctx *ctx = NULL;
     uint32_t stream_hdr;
     uint8_t stream_type;
     size_t stream_len;
 
     ctx = malloc(sizeof(*ctx));
-    memset(ctx, 0, sizeof(*ctx));
-
     if (ctx == NULL) {
         debug("Couldn't allocate memory (%zu bytes)", sizeof(*ctx));
         return NULL;
     }
+    memset(ctx, 0, sizeof(*ctx));
 
     if (src_len < 4) {
         debug("Couldn't read stream header");
@@ -670,7 +672,7 @@ static void decode_ctx_fini(salz_decode_ctx *ctx)
         free(ctx);
 }
 
-static bool stream_is_empty(salz_decode_ctx *ctx)
+static bool salz_stream_empty(salz_decode_ctx *ctx)
 {
     return ctx->src_pos == ctx->src_len;
 }
@@ -689,8 +691,6 @@ static bool cpy_plain_stream(salz_decode_ctx *ctx)
 
 static bool read_u8(salz_decode_ctx *ctx, uint8_t *res)
 {
-    static_assert(sizeof(*res) == 1);
-
     if (unlikely(ctx->src_pos + 1 > ctx->src_len))
         return false;
 
@@ -701,8 +701,6 @@ static bool read_u8(salz_decode_ctx *ctx, uint8_t *res)
 
 static bool read_u64(salz_decode_ctx *ctx, uint64_t *res)
 {
-    static_assert(sizeof(*res) == 8);
-
     if (unlikely(ctx->src_pos + 8 > ctx->src_len))
         return false;
 
@@ -984,7 +982,7 @@ int salz_decode_safe(uint8_t *src, size_t src_len, uint8_t *dst,
             goto out;
         }
     } else if (ctx->stream_type == STREAM_TYPE_SALZ) {
-        while (unlikely(!stream_is_empty(ctx))) {
+        while (unlikely(!salz_stream_empty(ctx))) {
             uint8_t token;
 
             if (unlikely(!read_bit(ctx, &token))) {

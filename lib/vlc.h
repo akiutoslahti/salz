@@ -1,7 +1,7 @@
 /*
- * vlc.h - Defines for Variable-Length Codes used in SALZ
+ * vlc.h - Definitions for Variable-Length Codes used in SALZ
  *
- * Copyright (c) 2021 Aki Utoslahti. All rights reserved.
+ * Copyright (c) 2021-2023 Aki Utoslahti. All rights reserved.
  *
  * This work is distributed under terms of the MIT license.
  * See file LICENSE or a copy at <https://opensource.org/licenses/MIT>.
