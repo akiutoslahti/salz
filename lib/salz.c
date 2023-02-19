@@ -80,239 +80,305 @@ enum salz_stream_type {
 #define TOKEN_TYPE_LITERAL (0)
 #define TOKEN_TYPE_FACTOR  (1)
 
-struct io_stream {
-    uint8_t *buf;
-    size_t buf_len;
-    size_t buf_pos;
+/* SALZ I/O context */
+struct salz_io_ctx {
+    /* Common members */
+    const uint8_t *src;
+    size_t src_len;
+    size_t src_pos;
     uint64_t bits;
     size_t bits_avail;
-    size_t bits_pos;
+    uint8_t *dst;
+    size_t dst_len;
+    size_t dst_pos;
+    /* Context-bound members */
+    union {
+        /* Encoding-only members */
+        struct {
+            size_t bits_pos;
+            int32_t *sa;
+            size_t sa_len;
+            int32_t *aux;
+            size_t aux_len;
+            int32_t prev_psv;
+            size_t prev_psv_len;
+            int32_t prev_nsv;
+            size_t prev_nsv_len;
+        };
+        /* Decoding-only members */
+        struct {
+            uint8_t stream_type;
+        };
+    };
 };
 
-static void write_u8(struct io_stream *stream, uint8_t val)
+typedef struct salz_io_ctx salz_io_ctx;
+
+/*
+ * Raw I/O functions
+ */
+
+static void write_u32_raw(uint8_t *buf, size_t pos, uint32_t val)
 {
-    assert(stream->buf_pos < stream->buf_len);
-    stream->buf[stream->buf_pos++] = val;
+    salz_memcpy(&buf[pos], &val, sizeof(val));
 }
 
-static void write_u32(uint8_t *dst, size_t pos, uint32_t val)
+static void write_u64_raw(uint8_t *buf, size_t pos, uint64_t val)
 {
-    salz_memcpy(&dst[pos], &val, sizeof(val));
+    salz_memcpy(&buf[pos], &val, sizeof(val));
 }
 
-static uint64_t read_u64_unsafe(const uint8_t *src, size_t pos)
+static uint64_t read_u32_raw(const uint8_t *buf, size_t pos)
 {
-    uint64_t val;
+    uint32_t val;
 
-    salz_memcpy(&val, &src[pos], sizeof(val));
+    salz_memcpy(&val, &buf[pos], sizeof(val));
 
     return val;
 }
 
-static void write_u64(uint8_t *dst, size_t pos, uint64_t val)
+static uint64_t read_u64_raw(const uint8_t *buf, size_t pos)
 {
-    salz_memcpy(&dst[pos], &val, sizeof(val));
+    uint64_t val;
+
+    salz_memcpy(&val, &buf[pos], sizeof(val));
+
+    return val;
 }
 
-static void flush_bits(struct io_stream *stream)
+/*
+ * Common I/O functions
+ */
+
+static bool input_processed(salz_io_ctx *ctx)
 {
-    assert(stream->buf_pos + field_sizeof(struct io_stream, bits) <
-           stream->buf_len + 1);
-    write_u64(stream->buf, stream->bits_pos, stream->bits);
-    stream->bits = 0;
-    stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
-    stream->bits_pos = stream->buf_pos;
-    stream->buf_pos += field_sizeof(struct io_stream, bits);
+    assert(ctx->src_pos <= ctx->src_len);
+    return ctx->src_pos == ctx->src_len;
 }
 
-static void write_bit(struct io_stream *stream, uint8_t bit)
+static bool cpy_literal(salz_io_ctx *ctx)
 {
-    if (stream->bits_avail == 0)
-        flush_bits(stream);
+    if (unlikely(ctx->src_pos == ctx->src_len || ctx->dst_pos == ctx->dst_len))
+        return false;
 
-    stream->bits = (stream->bits << 1) | bit;
-    stream->bits_avail -= 1;
+    ctx->dst[ctx->dst_pos++] = ctx->src[ctx->src_pos++];
+
+    return true;
 }
 
-static void write_bits(struct io_stream *stream, uint64_t bits, size_t count)
+/*
+ * Encoding I/O functions
+ */
+
+static salz_io_ctx *encode_ctx_create(const uint8_t *src, size_t src_len,
+    uint8_t *dst, size_t dst_len)
 {
-    if (stream->bits_avail == 0)
-        flush_bits(stream);
+    salz_io_ctx *ctx = NULL;
+    int32_t *sa = NULL;
+    size_t sa_len;
+    int32_t *aux = NULL;
+    size_t aux_len;
 
-    if (count > stream->bits_avail) {
-        stream->bits = (stream->bits << stream->bits_avail) |
-                       ((bits >> (count - stream->bits_avail)) &
-                        ((1u << stream->bits_avail) - 1));
-        count -= stream->bits_avail;
+    ctx = malloc(sizeof(*ctx));
+    if (ctx == NULL) {
+        debug("Couldn't allocate memory (%zu bytes)", sizeof(*ctx));
+        return NULL;
+    }
+    memset(ctx, 0, sizeof(*ctx));
 
-        flush_bits(stream);
+    /*
+     * Force last 8 bytes to be encoded as literals to make
+     * copying factors 8 bytes at a time safe
+     */
+    src_len -= 8;
+
+    sa_len = src_len + 2;
+    sa = calloc(sa_len, sizeof(*sa));
+    if (sa == NULL) {
+        debug("Couldn't allocate memory (%zu bytes)", sa_len * sizeof(*sa));
+        goto fail;
     }
 
-    stream->bits = (stream->bits << count) | (bits & ((1u << count) - 1));
-    stream->bits_avail -= count;
+    aux_len = 4 * (src_len + 1);
+    aux = calloc(aux_len, sizeof(*aux));
+    if (sa == NULL) {
+        debug("Couldn't allocate memory (%zu bytes)", aux_len * sizeof(*aux));
+        goto fail;
+    }
+
+    if (dst_len < 4) {
+        debug("Couldn't reserve space for stream header");
+        goto fail;
+    }
+
+    ctx->src = src;
+    ctx->src_len = src_len;
+    ctx->src_pos = 0;
+    ctx->dst = dst;
+    ctx->dst_len = dst_len;
+    ctx->dst_pos = 4;
+    ctx->bits = 0;
+    ctx->bits_avail = 0;
+    ctx->bits_pos = 0;
+    ctx->sa = sa;
+    ctx->sa_len = sa_len;
+    ctx->aux = aux;
+    ctx->aux_len = aux_len;
+    ctx->prev_psv = -1;
+    ctx->prev_psv_len = 0;
+    ctx->prev_nsv = -1;
+    ctx->prev_nsv_len = 0;
+
+    return ctx;
+
+fail:
+    free(sa);
+    free(aux);
+    free(ctx);
+    return NULL;
 }
 
-static void write_zeros(struct io_stream *stream, size_t count)
+static void encode_ctx_destroy(salz_io_ctx *ctx)
+{
+    if (ctx != NULL) {
+        free(ctx->sa);
+        free(ctx->aux);
+        free(ctx);
+    }
+}
+
+static bool write_u8(salz_io_ctx *ctx, uint8_t val)
+{
+    if (unlikely(ctx->dst_pos + 1 > ctx->dst_len))
+        return false;
+
+    ctx->dst[ctx->dst_pos++] = val;
+
+    return true;
+}
+
+static bool flush_bits(salz_io_ctx *ctx)
+{
+    write_u64_raw(ctx->dst, ctx->bits_pos, ctx->bits);
+
+    if (unlikely(ctx->dst_pos + 8 > ctx->dst_len))
+        return false;
+
+    ctx->bits = 0;
+    ctx->bits_avail = 64;
+    ctx->bits_pos = ctx->dst_pos;
+    ctx->dst_pos += 8;
+
+    return true;
+}
+
+static bool write_bit(salz_io_ctx *ctx, uint8_t val)
+{
+    if (ctx->bits_avail == 0 && unlikely(!flush_bits(ctx)))
+        return false;
+
+    ctx->bits = (ctx->bits << 1) | (val & 1);
+    ctx->bits_avail -= 1;
+
+    return true;
+}
+
+static bool write_bits(salz_io_ctx *ctx, uint64_t bits, size_t count)
+{
+    if (ctx->bits_avail == 0 && unlikely(!flush_bits(ctx)))
+        return false;
+
+    if (count > ctx->bits_avail) {
+        ctx->bits = (ctx->bits << ctx->bits_avail) |
+                    ((bits >> (count - ctx->bits_avail)) &
+                     ((1u << ctx->bits_avail) - 1));
+        count -= ctx->bits_avail;
+
+        if (unlikely(!flush_bits(ctx)))
+            return false;
+    }
+
+    ctx->bits = (ctx->bits << count) | (bits & ((1u << count) - 1));
+    ctx->bits_avail -= count;
+
+    return true;
+}
+
+static bool write_zeros(salz_io_ctx *ctx, size_t count)
 {
     while (count) {
-        if (stream->bits_avail == 0)
-            flush_bits(stream);
+        if (ctx->bits_avail == 0 && unlikely(!flush_bits(ctx)))
+            return false;
 
-        size_t write_count = min(stream->bits_avail, count);
-        stream->bits <<= write_count;
-        stream->bits_avail -= write_count;
+        size_t write_count = min(ctx->bits_avail, count);
+        ctx->bits <<= write_count;
+        ctx->bits_avail -= write_count;
         count -= write_count;
     }
+
+    return true;
 }
 
-static void write_unary(struct io_stream *stream, uint32_t val)
+static bool write_unary(salz_io_ctx *ctx, uint32_t val)
 {
-    write_zeros(stream, val);
-    write_bit(stream, 1);
+    if (unlikely(!write_zeros(ctx, val)))
+        return false;
+    if (unlikely(!write_bit(ctx, 1)))
+        return false;
+
+    return true;
 }
 
-static size_t gr3_bitsize(uint32_t val)
+static bool write_gr3(salz_io_ctx *ctx, uint32_t val)
 {
-    return (val >> 3) + 1 + 3;
+    if (unlikely(!write_unary(ctx, val >> 3)))
+        return false;
+    if (unlikely(!write_bits(ctx, val & 0x7u, 3)))
+        return false;
+
+    return true;
 }
 
-static void write_gr3(struct io_stream *stream, uint32_t val)
-{
-    write_unary(stream, val >> 3);
-    write_bits(stream, val & ((1u << 3) - 1), 3);
-}
-
-static size_t vnibble_bitsize(uint32_t val)
-{
-    return 4 * vnibble_size(val);
-}
-
-static void write_vnibble(struct io_stream *stream, uint32_t val)
+static bool write_vnibble(salz_io_ctx *ctx, uint32_t val)
 {
     uint64_t nibbles;
 
     size_t nibbles_len = encode_vnibble_le(val, &nibbles);
 
-    write_bits(stream, nibbles, nibbles_len * 4);
+    if (unlikely(!write_bits(ctx, nibbles, nibbles_len * 4)))
+        return false;
+
+    return true;
 }
 
-static size_t stream_len_get(struct io_stream *stream)
+/*
+ * Encoding functions
+ */
+
+static bool build_sa(salz_io_ctx *ctx)
 {
-    return stream->buf_pos;
+    if (libsais(ctx->src, ctx->sa + 1, ctx->src_len, 0, NULL) < 0)
+        return false;
+
+    return true;
 }
 
-static void enc_stream_init(struct io_stream *stream)
+static void build_psvnsv(salz_io_ctx *ctx)
 {
-    assert(field_sizeof(struct io_stream, bits) < stream->buf_len + 1);
-    stream->buf_pos = field_sizeof(struct io_stream, bits);
-    stream->bits = 0;
-    stream->bits_pos = 0;
-    stream->bits_avail = field_sizeof(struct io_stream, bits) * 8;
-}
+    int32_t *sa = ctx->sa;
+    int32_t *aux = ctx->aux;
 
-static struct io_stream *enc_stream_create(size_t size)
-{
-    struct io_stream *stream;
-
-    if ((stream = malloc(sizeof(*stream))) == NULL)
-        return NULL;
-    memset(stream, 0, sizeof(*stream));
-
-    if ((stream->buf = malloc(size)) == NULL) {
-        free(stream);
-        return NULL;
+    sa[0] = -1;
+    sa[ctx->src_len + 1] = -1;
+    for (size_t top = 0, i = 1; i < ctx->src_len + 2; i++) {
+        while (sa[top] > sa[i]) {
+            aux[0 + 4 * sa[top]] = sa[top - 1]; /* PSV */
+            aux[1 + 4 * sa[top]] = sa[i]; /* NSV */
+            top -= 1;
+        }
+        top += 1;
+        sa[top] = sa[i];
     }
-
-    stream->buf_len = size;
-    enc_stream_init(stream);
-
-    return stream;
-}
-
-static void enc_stream_destroy(struct io_stream *stream)
-{
-    if (stream == NULL)
-        return;
-    free(stream->buf);
-    free(stream);
-}
-
-static size_t enc_stream_fini(struct io_stream *stream, uint8_t *dst,
-    size_t dst_len, size_t dst_pos)
-{
-    size_t orig_pos = dst_pos;
-
-    stream->bits <<= (stream->bits_avail);
-    write_u64(stream->buf, stream->bits_pos, stream->bits);
-
-    if (dst) {
-        uint32_t stream_hdr = 0;
-        stream_hdr |= STREAM_TYPE_SALZ << 24;
-        stream_hdr |= stream->buf_pos & 0xffffff;
-        write_u32(dst, dst_pos, stream_hdr);
-        dst_pos += 4;
-
-        if (dst_pos + stream->buf_pos > dst_len)
-            return 0;
-
-        salz_memcpy(&dst[dst_pos], stream->buf, stream->buf_pos);
-        dst_pos += stream->buf_pos;
-    }
-
-    return dst_pos - orig_pos;
-}
-
-struct factor_ctx {
-    int32_t psv;
-    size_t psv_len;
-    int32_t nsv;
-    size_t nsv_len;
-};
-
-static struct factor_ctx *factor_ctx_create(void)
-{
-    struct factor_ctx *ctx;
-
-    if ((ctx = malloc(sizeof(*ctx))) == NULL)
-        return NULL;
-
-    ctx->psv = -1;
-    ctx->psv_len = 0;
-    ctx->nsv = -1;
-    ctx->nsv_len = 0;
-
-    return ctx;
-}
-
-static void factor_ctx_destroy(struct factor_ctx *ctx)
-{
-    if (ctx == NULL)
-        return;
-    free(ctx);
-}
-
-#define min_factor_offs 1
-#define min_factor_len 3
-
-static size_t factor_offs_bitsize(uint32_t val)
-{
-    return 8 + vnibble_bitsize((val - min_factor_offs) >> 8);
-}
-
-static void write_factor_offs(struct io_stream *stream, uint32_t val)
-{
-    write_vnibble(stream, (val - min_factor_offs) >> 8);
-    write_u8(stream, (val - min_factor_offs) & 0xffu);
-}
-
-static size_t factor_len_bitsize(uint32_t val)
-{
-    return gr3_bitsize(val - min_factor_len);
-}
-
-static void write_factor_len(struct io_stream *stream, uint32_t val)
-{
-    write_gr3(stream, val - min_factor_len);
 }
 
 static size_t lcp_cmp(const uint8_t *text, size_t text_len, size_t common_len,
@@ -320,9 +386,9 @@ static size_t lcp_cmp(const uint8_t *text, size_t text_len, size_t common_len,
 {
     size_t len = common_len;
 
-    while (pos2 + len < text_len - 8 + 1) {
-        uint64_t val1 = read_u64_unsafe(text, pos1 + len);
-        uint64_t val2 = read_u64_unsafe(text, pos2 + len);
+    while (pos2 + len + 8 <= text_len) {
+        uint64_t val1 = read_u64_raw(text, pos1 + len);
+        uint64_t val2 = read_u64_raw(text, pos2 + len);
         uint64_t diff = val1 ^ val2;
 
         if (diff)
@@ -337,145 +403,78 @@ static size_t lcp_cmp(const uint8_t *text, size_t text_len, size_t common_len,
     return len;
 }
 
-static void lz_factor(struct factor_ctx *ctx, const uint8_t *text,
-    size_t text_len, size_t pos, int32_t psv, int32_t nsv)
+static void factorize_pos(salz_io_ctx *ctx, size_t pos, int32_t psv,
+    int32_t nsv)
 {
     size_t psv_len = 0;
     size_t nsv_len = 0;
 
     if (psv != -1) {
-        size_t common_len = ctx->psv_len + !ctx->psv_len - 1;
-        psv_len = lcp_cmp(text, text_len, common_len, psv, pos);
+        size_t common_len = ctx->prev_psv_len + !ctx->prev_psv_len - 1;
+        psv_len = lcp_cmp(ctx->src, ctx->src_len, common_len, psv, pos);
     }
 
     if (nsv != -1) {
-        size_t common_len = ctx->nsv_len + !ctx->nsv_len - 1;
-        nsv_len = lcp_cmp(text, text_len, common_len, nsv, pos);
+        size_t common_len = ctx->prev_nsv_len + !ctx->prev_nsv_len - 1;
+        nsv_len = lcp_cmp(ctx->src, ctx->src_len, common_len, nsv, pos);
     }
 
-    ctx->psv = psv;
-    ctx->psv_len = psv_len;
-    ctx->nsv = nsv;
-    ctx->nsv_len = nsv_len;
+    ctx->prev_psv = psv;
+    ctx->prev_psv_len = psv_len;
+    ctx->prev_nsv = nsv;
+    ctx->prev_nsv_len = nsv_len;
 }
 
-size_t salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
-    size_t dst_len)
+static void factorize(salz_io_ctx *ctx)
 {
-    int32_t *sa = NULL;
-    size_t sa_len;
-    int32_t *aux = NULL;
-    size_t aux_len;
-    struct io_stream *enc_stream = NULL;
-    size_t enc_stream_capacity;
-    struct factor_ctx *fctx = NULL;
-    size_t src_pos;
-    size_t dst_pos;
-    size_t written = 0;
-
-    /*
-     * @TODO Determine the size of smallest data chunk that can be encoded.
-     * Atleast if src_len <= 8 MUST fail
-     */
-
-    /*
-     * Allocate resources for encoding
-     */
-
-    sa_len = src_len + 2;
-    aux_len = 4 * (src_len + 1);
-    /*
-     * Determine the upper boundary for the final compressed size to eliminate
-     * buffer boundary checks when writing to the encoding stream.
-     */
-    enc_stream_capacity = src_len + roundup(src_len, 64) / 8;
-
-    if ((sa = malloc(sa_len * sizeof(*sa))) == NULL ||
-        (aux = malloc(aux_len * sizeof(*aux))) == NULL ||
-        (enc_stream = enc_stream_create(enc_stream_capacity)) == NULL ||
-        (fctx = factor_ctx_create()) == NULL) {
-        debug("Couldn't allocate enough memory for encoding");
-        goto exit;
-    }
-
-    /*
-     * Force last 8 bytes to be encoded as literals to make
-     * copying factors 8 bytes at a time safe.
-     */
-    src_len -= 8;
-
-#ifdef ENABLE_STATS
-    start_clock();
-#endif
-
-    /*
-     * Construction of Suffix Array
-     */
-
-    if (libsais(src, sa + 1, src_len, 0, NULL) != 0) {
-        debug("Couldn't construct Suffix Array with 'libsais'");
-        goto exit;
-    }
-
-#ifdef ENABLE_STATS
-    increment_clock(st.sa_time);
-#endif
-
-    /*
-     * PSV/NSV array construction using only Suffix Array as described in [2].
-     */
-
-    sa[0] = -1;
-    sa[src_len + 1] = -1;
-    for (size_t top = 0, i = 1; i < src_len + 2; i++) {
-        while (sa[top] > sa[i]) {
-            aux[0 + 4 * sa[top]] = sa[top - 1]; /* PSV */
-            aux[1 + 4 * sa[top]] = sa[i]; /* NSV */
-            top -= 1;
-        }
-        top += 1;
-        sa[top] = sa[i];
-    }
-
-#ifdef ENABLE_STATS
-    increment_clock(st.psv_nsv_time);
-#endif
-
-    /*
-     * Determining factor candidates for all text positions as described in
-     * Section 3.4 of [1].
-     */
+    int32_t *aux = ctx->aux;
 
     /* Skip factorization of first position and force it to be a literal */
     aux[1 + 4 * 0] = 1;
     aux[3 + 4 * 0] = 1;
-    for (size_t src_pos = 1; src_pos < src_len; src_pos++) {
-        int32_t psv = aux[0 + 4 * src_pos];
-        int32_t nsv = aux[1 + 4 * src_pos];
+    for (size_t pos = 1; pos < ctx->src_len; pos++) {
+        int32_t psv = aux[0 + 4 * pos];
+        int32_t nsv = aux[1 + 4 * pos];
 
-        lz_factor(fctx, src, src_len, src_pos, psv, nsv);
+        factorize_pos(ctx, pos, psv, nsv);
 
-        aux[0 + 4 * src_pos] = (int32_t)(src_pos - fctx->psv);
-        aux[1 + 4 * src_pos] = (int32_t)fctx->psv_len;
-        aux[2 + 4 * src_pos] = (int32_t)(src_pos - fctx->nsv);
-        aux[3 + 4 * src_pos] = (int32_t)fctx->nsv_len;
+        aux[0 + 4 * pos] = (int32_t)(pos - ctx->prev_psv);
+        aux[1 + 4 * pos] = (int32_t)ctx->prev_psv_len;
+        aux[2 + 4 * pos] = (int32_t)(pos - ctx->prev_nsv);
+        aux[3 + 4 * pos] = (int32_t)ctx->prev_nsv_len;
     }
+}
 
-#ifdef ENABLE_STATS
-    increment_clock(st.factor_time);
-#endif
+#define min_factor_offs 1
+#define min_factor_len 3
 
-    /*
-     * Dynamic programming SSSP (Single Source Shortest Path) approach to
-     * optimizing the final encoded size of the Lempel-Ziv factorization
-     * of a text as described in Section 3.5.4 of [1].
-     */
+static size_t vnibble_bitsize(uint32_t val)
+{
+    return 4 * vnibble_size(val);
+}
 
-    /*
-     * Nothing left to do after reaching last position, initialize cost as zero
-     */
-    aux[2 + 4 * src_len] = 0;
-    for (size_t src_pos = src_len - 1; src_pos; src_pos--) {
+static size_t factor_offs_bitsize(uint32_t val)
+{
+    return 8 + vnibble_bitsize((val - min_factor_offs) >> 8);
+}
+
+static size_t gr3_bitsize(uint32_t val)
+{
+    return (val >> 3) + 1 + 3;
+}
+
+static size_t factor_len_bitsize(uint32_t val)
+{
+    return gr3_bitsize(val - min_factor_len);
+}
+
+static void dp_mincost(salz_io_ctx *ctx)
+{
+    int32_t *aux = ctx->aux;
+
+    /* Nothing to do after reaching last position - initialize cost as zero */
+    aux[2 + 4 * ctx->src_len] = 0;
+    for (size_t src_pos = ctx->src_len - 1; src_pos; src_pos--) {
         /* Cost of using a literal */
         int32_t factor_offs = 0;
         int32_t factor_len = 1;
@@ -515,109 +514,179 @@ size_t salz_encode_default(const uint8_t *src, size_t src_len, uint8_t *dst,
         aux[1 + 4 * src_pos] = factor_len;
         aux[2 + 4 * src_pos] = cost;
     }
+}
 
-#ifdef ENABLE_STATS
-    increment_clock(st.mincost_time);
-#endif
+static bool write_token(salz_io_ctx *ctx, uint8_t val)
+{
+    if (unlikely(!write_bit(ctx, val)))
+        return false;
+    return true;
+}
+
+static bool write_factor_offs(salz_io_ctx *ctx, uint32_t val)
+{
+    if (unlikely(!write_vnibble(ctx, (val - min_factor_offs) >> 8)))
+        return false;
+    if (unlikely(!write_u8(ctx, (val - min_factor_offs) & 0xffu)))
+        return false;
+
+    return true;
+}
+
+static bool write_factor_len(salz_io_ctx *ctx, uint32_t val)
+{
+    if (unlikely(!write_gr3(ctx, val - min_factor_len)))
+        return false;
+    return true;
+}
+
+static bool write_factor(salz_io_ctx *ctx, uint32_t factor_offs,
+    uint32_t factor_len)
+{
+    if (unlikely(!write_factor_offs(ctx, factor_offs)))
+        return false;
+    if (unlikely(!write_factor_len(ctx, factor_len)))
+        return false;
+
+    ctx->src_pos += factor_len;
+
+    return true;
+}
+
+static bool encode(salz_io_ctx *ctx)
+{
+    int32_t *aux = ctx->aux;
+
+    while (!input_processed(ctx)) {
+        uint32_t factor_len = (uint32_t)aux[1 + 4 * ctx->src_pos];
+
+        if (factor_len == 1) {
+            if (unlikely(!write_token(ctx, TOKEN_TYPE_LITERAL)))
+                return false;
+            if (unlikely(!cpy_literal(ctx)))
+                return false;
+        } else {
+            uint32_t factor_offs = (uint32_t)aux[0 + 4 * ctx->src_pos];
+
+            if (unlikely(!write_token(ctx, TOKEN_TYPE_FACTOR)))
+                return false;
+            if (unlikely(!write_factor(ctx, factor_offs, factor_len)))
+                return false;
+        }
+    }
+
+    return true;
+}
+
+static bool finalize_encoding(salz_io_ctx *ctx)
+{
+    uint32_t stream_hdr = 0;
+
+    /*
+     * Encode the last 8 bytes that were "forced" to be literals in the start
+     */
+    ctx->src_len += 8;
+    for (size_t i = 0; i < 8; i++) {
+        if (unlikely(!write_token(ctx, TOKEN_TYPE_LITERAL)))
+            return false;
+        if (unlikely(!cpy_literal(ctx)))
+            return false;
+    }
+
+    ctx->bits <<= ctx->bits_avail;
+    write_u64_raw(ctx->dst, ctx->bits_pos, ctx->bits);
+
+    if (ctx->dst_pos > ctx->src_len + 4) {
+        stream_hdr |= STREAM_TYPE_PLAIN << 24;
+        stream_hdr |= ctx->src_len & 0xffffff;
+        write_u32_raw(ctx->dst, 0, stream_hdr);
+        ctx->dst_pos = 4;
+
+        if (unlikely(ctx->dst_pos + ctx->src_len > ctx->dst_len)) {
+            debug("Couldn't copy plain stream");
+        }
+        salz_memcpy(&ctx->dst[ctx->dst_pos], ctx->src, ctx->src_len);
+        ctx->dst_pos += ctx->src_len;
+    } else {
+        stream_hdr |= STREAM_TYPE_SALZ << 24;
+        stream_hdr |= (ctx->dst_pos - 4) & 0xffffff;
+        write_u32_raw(ctx->dst, 0, stream_hdr);
+    }
+
+    return true;
+}
+
+int salz_encode_safe(const uint8_t *src, size_t src_len, uint8_t *dst,
+    size_t *dst_len)
+{
+    salz_io_ctx *ctx = NULL;
+    int ret = 0;
+
+    if (src == NULL || dst == NULL) {
+        debug("NULL I/O buffer(s)");
+        return -1;
+    }
+
+    ctx = encode_ctx_create(src, src_len, dst, *dst_len);
+    if (ctx == NULL) {
+        debug("Couldn't initialize encoding context");
+        return -1;
+    }
+
+    /* Suffix array construction */
+    if (!build_sa(ctx)) {
+        debug("Couldn't build SA");
+        ret = -1;
+        goto out;
+    }
+
+    /* PSV/NSV array construction from suffix array as described in [2] */
+    build_psvnsv(ctx);
+
+    /*
+     * Determine factor candidates for all text positions as described in
+     * Section 3.4 of [1].
+     */
+    factorize(ctx);
+
+    /*
+     * Dynamic programming SSSP (Single Source Shortest Path) approach to
+     * optimizing the final encoded size of the Lempel-Ziv factorization
+     * of a text as described in Section 3.5.4 of [1].
+     */
+    dp_mincost(ctx);
 
     /*
      * Encoding the produced Lempel-Ziv factorization using an encoding format
      * described in Sections 3.6.1 and 3.6.3 of [1].
      */
-
-    src_pos = 0;
-    while (src_pos < src_len) {
-        uint32_t factor_len = (uint32_t)aux[1 + 4 * src_pos];
-        if (factor_len == 1) {
-            /* Literal */
-            write_bit(enc_stream, 0);
-            assert(src_pos < src_len);
-            write_u8(enc_stream, src[src_pos]);
-        } else {
-            /* Factor */
-            write_bit(enc_stream, 1);
-            uint32_t factor_offs = (uint32_t)aux[0 + 4 * src_pos];
-            write_factor_offs(enc_stream, factor_offs);
-            write_factor_len(enc_stream, factor_len);
-        }
-        src_pos += factor_len;
+    if (!encode(ctx)) {
+        debug("Encoding failed");
+        ret = -1;
+        goto out;
     }
 
-    /*
-     * Encode the last 8 bytes that were "forced" to be literals in the start.
-     */
-    src_len += 8;
-    for (size_t i = 0; i < 8; i++) {
-        write_bit(enc_stream, 0);
-        assert(src_pos < src_len);
-        write_u8(enc_stream, src[src_pos]);
-        src_pos += 1;
+    if (!finalize_encoding(ctx)) {
+        debug("Couldn't finalize encoding");
+        ret = -1;
+        goto out;
     }
 
-    dst_pos = 0;
-    if (stream_len_get(enc_stream) >= src_len + 9) {
-        uint32_t stream_hdr = 0;
-        stream_hdr |= STREAM_TYPE_PLAIN << 24;
-        stream_hdr |= src_len & 0xffffff;
-        write_u32(dst, dst_pos, stream_hdr);
-        dst_pos += 4;
-        if (dst_pos + src_len > dst_len) {
-            debug("Couldn't write uncompressed data into 'dst' buf - "
-                  "not enough space");
-            goto exit;
-        }
+    *dst_len = ctx->dst_pos;
 
-        salz_memcpy(&dst[dst_pos], &src[src_pos], src_len);
-        src_pos += src_len;
-        dst_pos += dst_len;
-    }
-    else {
-        dst_pos += enc_stream_fini(enc_stream, dst, dst_len, dst_pos);
-        if (dst_pos == 0) {
-            debug("Couldn't write encoded data into 'dst' buf - not enough space");
-            goto exit;
-        }
-    }
-
-#ifdef ENABLE_STATS
-    increment_clock(st.encode_time);
-#endif
-
-    written = dst_pos;
-
-exit:
-    factor_ctx_destroy(fctx);
-    enc_stream_destroy(enc_stream);
-    free(aux);
-    free(sa);
-
-    return written;
+out:
+    encode_ctx_destroy(ctx);
+    return ret;
 }
 
-struct salz_decode_ctx {
-    uint8_t stream_type;
+/*
+ * Decoding I/O functions
+ */
 
-    /* SALZ encoded input */
-    uint8_t *src;
-    size_t src_len;
-    size_t src_pos;
-
-    /* Buffered bitsream (interleaved synchronously with input) */
-    uint64_t bits;
-    size_t bits_avail;
-
-    /* Plain output */
-    uint8_t *dst;
-    size_t dst_len;
-    size_t dst_pos;
-};
-
-typedef struct salz_decode_ctx salz_decode_ctx;
-
-static salz_decode_ctx *decode_ctx_init(uint8_t *src, size_t src_len,
+static salz_io_ctx *decode_ctx_create(const uint8_t *src, size_t src_len,
     uint8_t *dst, size_t dst_len)
 {
-    salz_decode_ctx *ctx = NULL;
+    salz_io_ctx *ctx = NULL;
     uint32_t stream_hdr;
     uint8_t stream_type;
     size_t stream_len;
@@ -634,7 +703,7 @@ static salz_decode_ctx *decode_ctx_init(uint8_t *src, size_t src_len,
         goto fail;
     }
 
-    salz_memcpy(&stream_hdr, src, 4);
+    stream_hdr = read_u32_raw(src, 0);
     stream_type = stream_hdr >> 24;
     stream_len = stream_hdr & 0xffffff;
 
@@ -650,6 +719,7 @@ static salz_decode_ctx *decode_ctx_init(uint8_t *src, size_t src_len,
     }
 
     ctx->stream_type = stream_type;
+    /* Stream is repositioned right after the header */
     ctx->src = src + 4;
     ctx->src_len = stream_len;
     ctx->src_pos = 0;
@@ -666,30 +736,13 @@ fail:
     return NULL;
 }
 
-static void decode_ctx_fini(salz_decode_ctx *ctx)
+static void decode_ctx_destroy(salz_io_ctx *ctx)
 {
     if (ctx != NULL)
         free(ctx);
 }
 
-static bool salz_stream_empty(salz_decode_ctx *ctx)
-{
-    return ctx->src_pos == ctx->src_len;
-}
-
-static bool cpy_plain_stream(salz_decode_ctx *ctx)
-{
-    if (ctx->dst_len - ctx->dst_pos < ctx->src_len - ctx->src_pos)
-        return false;
-
-    salz_memcpy(&ctx->dst[ctx->dst_pos],
-                &ctx->src[ctx->src_pos],
-                ctx->src_len - ctx->src_pos);
-
-    return true;
-}
-
-static bool read_u8(salz_decode_ctx *ctx, uint8_t *res)
+static bool read_u8(salz_io_ctx *ctx, uint8_t *res)
 {
     if (unlikely(ctx->src_pos + 1 > ctx->src_len))
         return false;
@@ -699,7 +752,7 @@ static bool read_u8(salz_decode_ctx *ctx, uint8_t *res)
     return true;
 }
 
-static bool read_u64(salz_decode_ctx *ctx, uint64_t *res)
+static bool read_u64(salz_io_ctx *ctx, uint64_t *res)
 {
     if (unlikely(ctx->src_pos + 8 > ctx->src_len))
         return false;
@@ -710,7 +763,7 @@ static bool read_u64(salz_decode_ctx *ctx, uint64_t *res)
     return true;
 }
 
-static bool queue_bits(salz_decode_ctx *ctx)
+static bool queue_bits(salz_io_ctx *ctx)
 {
     if (unlikely(!read_u64(ctx, &ctx->bits)))
         return false;
@@ -720,7 +773,7 @@ static bool queue_bits(salz_decode_ctx *ctx)
     return true;
 }
 
-static bool read_bit(salz_decode_ctx *ctx, uint8_t *res)
+static bool read_bit(salz_io_ctx *ctx, uint8_t *res)
 {
     if (ctx->bits_avail == 0 && unlikely(!queue_bits(ctx)))
         return false;
@@ -732,7 +785,7 @@ static bool read_bit(salz_decode_ctx *ctx, uint8_t *res)
     return true;
 }
 
-static bool read_bits(salz_decode_ctx *ctx, size_t count, uint64_t *res)
+static bool read_bits(salz_io_ctx *ctx, size_t count, uint64_t *res)
 {
     assert(count <= 64);
 
@@ -759,7 +812,7 @@ static bool read_bits(salz_decode_ctx *ctx, size_t count, uint64_t *res)
     return true;
 }
 
-static bool read_unary(salz_decode_ctx *ctx, uint32_t *res)
+static bool read_unary(salz_io_ctx *ctx, uint32_t *res)
 {
     uint32_t last_zeros;
 
@@ -782,7 +835,7 @@ static bool read_unary(salz_decode_ctx *ctx, uint32_t *res)
     return true;
 }
 
-static bool read_gr3(salz_decode_ctx *ctx, uint32_t *res)
+static bool read_gr3(salz_io_ctx *ctx, uint32_t *res)
 {
     uint32_t var;
     uint64_t fixed;
@@ -797,7 +850,7 @@ static bool read_gr3(salz_decode_ctx *ctx, uint32_t *res)
     return true;
 }
 
-static bool read_nibble(salz_decode_ctx *ctx, uint8_t *res)
+static bool read_nibble(salz_io_ctx *ctx, uint8_t *res)
 {
     uint64_t var;
 
@@ -809,7 +862,7 @@ static bool read_nibble(salz_decode_ctx *ctx, uint8_t *res)
     return true;
 }
 
-static bool read_vnibble(salz_decode_ctx *ctx, uint32_t *res)
+static bool read_vnibble(salz_io_ctx *ctx, uint32_t *res)
 {
     uint8_t nibble;
 
@@ -879,20 +932,30 @@ static bool read_vnibble(salz_decode_ctx *ctx, uint32_t *res)
     return true;
 }
 
-static bool cpy_literal(salz_decode_ctx *ctx)
+/*
+ * Decoding functions
+ */
+
+static bool cpy_plain_stream(salz_io_ctx *ctx)
 {
-    if (unlikely(ctx->src_pos == ctx->src_len || ctx->dst_pos == ctx->dst_len))
+    if (ctx->dst_len - ctx->dst_pos < ctx->src_len - ctx->src_pos)
         return false;
 
-    ctx->dst[ctx->dst_pos++] = ctx->src[ctx->src_pos++];
+    salz_memcpy(&ctx->dst[ctx->dst_pos],
+                &ctx->src[ctx->src_pos],
+                ctx->src_len - ctx->src_pos);
 
     return true;
 }
 
-static const int inc1[8] = { 0, 1, 2, 1, 4, 4, 4, 4 };
-static const int inc2[8] = { 0, 1, 2, 2, 4, 3, 2, 1 };
+static bool read_token(salz_io_ctx *ctx, uint8_t *res)
+{
+    if (unlikely(!read_bit(ctx, res)))
+        return false;
+    return true;
+}
 
-static bool read_factor_offs(salz_decode_ctx *ctx, uint32_t *res)
+static bool read_factor_offs(salz_io_ctx *ctx, uint32_t *res)
 {
     uint32_t var;
     uint8_t fixed;
@@ -907,7 +970,7 @@ static bool read_factor_offs(salz_decode_ctx *ctx, uint32_t *res)
     return true;
 }
 
-static bool read_factor_len(salz_decode_ctx *ctx, uint32_t *res)
+static bool read_factor_len(salz_io_ctx *ctx, uint32_t *res)
 {
     if (unlikely(!read_gr3(ctx, res)))
         return false;
@@ -917,13 +980,16 @@ static bool read_factor_len(salz_decode_ctx *ctx, uint32_t *res)
     return true;
 }
 
-static bool cpy_factor(salz_decode_ctx *ctx)
+static bool cpy_factor(salz_io_ctx *ctx)
 {
     uint32_t factor_offs;
     uint32_t factor_len;
     uint8_t *src;
     uint8_t *dst;
     uint8_t *end;
+
+    static const int inc1[8] = { 0, 1, 2, 1, 4, 4, 4, 4 };
+    static const int inc2[8] = { 0, 1, 2, 2, 4, 3, 2, 1 };
 
     if (unlikely(!read_factor_offs(ctx, &factor_offs)))
         return false;
@@ -958,10 +1024,39 @@ static bool cpy_factor(salz_decode_ctx *ctx)
     return true;
 }
 
-int salz_decode_safe(uint8_t *src, size_t src_len, uint8_t *dst,
+static bool decode(salz_io_ctx *ctx)
+{
+    while (!input_processed(ctx)) {
+        uint8_t token;
+
+        if (unlikely(!read_token(ctx, &token))) {
+            debug("Couldn't read token");
+            return false;
+        }
+
+        if (token == TOKEN_TYPE_LITERAL) {
+            if (unlikely(!cpy_literal(ctx))) {
+                debug("Couldn't copy a literal");
+                return false;
+            }
+        } else if (token == TOKEN_TYPE_FACTOR) {
+            if (unlikely(!cpy_factor(ctx))) {
+                debug("Couldn't copy a factor");
+                return false;
+            }
+        } else {
+            debug("Unexpected error");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+int salz_decode_safe(const uint8_t *src, size_t src_len, uint8_t *dst,
     size_t *dst_len)
 {
-    salz_decode_ctx *ctx = NULL;
+    salz_io_ctx *ctx = NULL;
     int ret = 0;
 
     if (src == NULL || dst == NULL) {
@@ -969,7 +1064,7 @@ int salz_decode_safe(uint8_t *src, size_t src_len, uint8_t *dst,
         return -1;
     }
 
-    ctx = decode_ctx_init(src, src_len, dst, *dst_len);
+    ctx = decode_ctx_create(src, src_len, dst, *dst_len);
     if (ctx == NULL) {
         debug("Couldn't initialize decoding context");
         return -1;
@@ -982,32 +1077,10 @@ int salz_decode_safe(uint8_t *src, size_t src_len, uint8_t *dst,
             goto out;
         }
     } else if (ctx->stream_type == STREAM_TYPE_SALZ) {
-        while (unlikely(!salz_stream_empty(ctx))) {
-            uint8_t token;
-
-            if (unlikely(!read_bit(ctx, &token))) {
-                debug("Couldn't read token");
-                ret = -1;
-                goto out;
-            }
-
-            if (token == TOKEN_TYPE_LITERAL) {
-                if (unlikely(!cpy_literal(ctx))) {
-                    debug("Couldn't copy a literal");
-                    ret = -1;
-                    goto out;
-                }
-            } else if (token == TOKEN_TYPE_FACTOR) {
-                if (unlikely(!cpy_factor(ctx))) {
-                    debug("Couldn't copy a factor");
-                    ret = -1;
-                    goto out;
-                }
-            } else {
-                debug("Unexpected error");
-                ret = -1;
-                goto out;
-            }
+        if (!decode(ctx)) {
+            debug("Decoding failed");
+            ret = -1;
+            goto out;
         }
     } else {
         debug("Unexpected error");
@@ -1018,6 +1091,6 @@ int salz_decode_safe(uint8_t *src, size_t src_len, uint8_t *dst,
     *dst_len = ctx->dst_pos;
 
 out:
-    decode_ctx_fini(ctx);
+    decode_ctx_destroy(ctx);
     return ret;
 }

@@ -27,8 +27,20 @@ struct stats {
 extern struct stats *get_stats(void);
 #endif
 
-extern size_t salz_encode_default(const uint8_t *src, size_t src_len,
-    uint8_t *dst, size_t dst_len);
+/*
+ * Encode plain segment with SALZ
+ *
+ * @param[in]     src      Plain segment to encode with SALZ
+ * @param[in]     src_len  Length of @p src (in bytes)
+ * @param[in]     dst      Preallocated space for encoded segment
+ * @param[in/out] dst_len  Space available in @p dst (in bytes) [in]
+ *                         Length of encoded segment (in bytes) [out]
+ *
+ * @return                 0, if successful
+ *                         -1, otherwise
+ */
+extern int salz_encode_safe(const uint8_t *src, size_t src_len,
+    uint8_t *dst, size_t *dst_len);
 
 /*
  * Decode SALZ encoded segment
@@ -42,7 +54,7 @@ extern size_t salz_encode_default(const uint8_t *src, size_t src_len,
  * @return                 0, if successful
  *                         -1, otherwise
  */
-extern int salz_decode_safe(uint8_t *src, size_t src_len,
+extern int salz_decode_safe(const uint8_t *src, size_t src_len,
     uint8_t *dst, size_t *dst_len);
 
 #endif /* !SALZ_H */

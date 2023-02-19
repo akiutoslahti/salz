@@ -114,26 +114,27 @@ static int compress_fname(char *in_fname, char *out_fname,
     out_fsize += write_len;
 
     while ((read_len = fread(src_buf, 1, src_len, in_stream)) != 0) {
+        size_t encoded_len;
         in_fsize += read_len;
-        size_t written = salz_encode_default(src_buf, read_len, dst_buf, dst_len);
 
-        if (written == 0) {
+        encoded_len = dst_len;
+        if (salz_encode_safe(src_buf, read_len, dst_buf, &encoded_len) != 0) {
             /* @TODO add error ? */
             goto fail;
         }
 
-        write_len = fwrite_vbyte(out_stream, written);
+        write_len = fwrite_vbyte(out_stream, encoded_len);
         if (write_len == 0) {
             /* @TODO add error ? */
             goto fail;
         }
         out_fsize += write_len;
 
-        if (fwrite(dst_buf, 1, written, out_stream) != written) {
+        if (fwrite(dst_buf, 1, encoded_len, out_stream) != encoded_len) {
             /* @TODO add error ? */
             goto fail;
         }
-        out_fsize += written;
+        out_fsize += encoded_len;
     }
     clock = get_time_ns() - clock;
 
@@ -208,7 +209,7 @@ static int decompress_fname(char *in_fname, char *out_fname)
 
     clock = get_time_ns();
     while (fread_vbyte(in_stream, &read_size) != 0) {
-        size_t encoded_len;
+        size_t decoded_len;
 
         if (read_size < src_len &&
             fread(src_buf, 1, read_size, in_stream) != read_size) {
@@ -216,18 +217,18 @@ static int decompress_fname(char *in_fname, char *out_fname)
             goto fail;
         }
 
-        encoded_len = dst_len;
-        if (salz_decode_safe(src_buf, read_size, dst_buf, &encoded_len) == -1) {
+        decoded_len = dst_len;
+        if (salz_decode_safe(src_buf, read_size, dst_buf, &decoded_len) != 0) {
             /* @TODO Add error ? */
             goto fail;
         }
 
-        if (fwrite(dst_buf, 1, encoded_len, out_stream) != encoded_len) {
+        if (fwrite(dst_buf, 1, decoded_len, out_stream) != decoded_len) {
             /* @TODO Add error ? */
             goto fail;
         }
 
-        out_fsize += encoded_len;
+        out_fsize += decoded_len;
     }
     clock = get_time_ns() - clock;
 
