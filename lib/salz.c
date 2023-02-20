@@ -599,19 +599,17 @@ static bool finalize_encoding(salz_io_ctx *ctx)
     if (ctx->dst_pos > ctx->src_len + 4) {
         stream_hdr |= STREAM_TYPE_PLAIN << 24;
         stream_hdr |= ctx->src_len & 0xffffff;
-        write_u32_raw(ctx->dst, 0, stream_hdr);
-        ctx->dst_pos = 4;
 
-        if (unlikely(ctx->dst_pos + ctx->src_len > ctx->dst_len)) {
-            debug("Couldn't copy plain stream");
-        }
-        salz_memcpy(&ctx->dst[ctx->dst_pos], ctx->src, ctx->src_len);
-        ctx->dst_pos += ctx->src_len;
+        if (unlikely(ctx->src_len + 4 > ctx->dst_len))
+            return false;
+
+        salz_memcpy(ctx->dst + 4, ctx->src, ctx->src_len);
+        ctx->dst_pos = ctx->src_len + 4;
     } else {
         stream_hdr |= STREAM_TYPE_SALZ << 24;
         stream_hdr |= (ctx->dst_pos - 4) & 0xffffff;
-        write_u32_raw(ctx->dst, 0, stream_hdr);
     }
+    write_u32_raw(ctx->dst, 0, stream_hdr);
 
     return true;
 }
@@ -938,12 +936,11 @@ static bool read_vnibble(salz_io_ctx *ctx, uint32_t *res)
 
 static bool cpy_plain_stream(salz_io_ctx *ctx)
 {
-    if (ctx->dst_len - ctx->dst_pos < ctx->src_len - ctx->src_pos)
+    if (ctx->src_len > ctx->dst_len)
         return false;
 
-    salz_memcpy(&ctx->dst[ctx->dst_pos],
-                &ctx->src[ctx->src_pos],
-                ctx->src_len - ctx->src_pos);
+    salz_memcpy(ctx->dst, ctx->src, ctx->src_len);
+    ctx->dst_pos = ctx->src_len;
 
     return true;
 }
