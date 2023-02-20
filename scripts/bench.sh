@@ -31,7 +31,7 @@ mkdir $build_path
 
 echo "3. Running cmake"
 cd $build_path
-cmake -DENABLE_STATS=On .. &> /dev/null
+cmake .. &> /dev/null
 
 echo "4. Running make"
 make &> /dev/null
@@ -41,7 +41,7 @@ echo -e "5. Running benchmarks\n"
 shift
 for file in $@
 do
-    for bs in {15..27}
+    for bs in {15..24}
     do
         rm -f $build_path/out.salz $build_path/out.unsalz
 

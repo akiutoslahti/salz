@@ -13,20 +13,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#ifdef ENABLE_STATS
-#include "common.h"
-
-struct stats {
-    uint64_t sa_time;
-    uint64_t psv_nsv_time;
-    uint64_t factor_time;
-    uint64_t mincost_time;
-    uint64_t encode_time;
-};
-
-extern struct stats *get_stats(void);
-#endif
-
 /*
  * Encode plain segment with SALZ
  *

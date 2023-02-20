@@ -13,9 +13,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-extern size_t vnibble_size(uint32_t val);
-extern size_t encode_vnibble_le(uint32_t val, uint64_t *res);
-
 extern size_t vbyte_size(uint32_t val);
 extern size_t encode_vbyte_be(uint32_t val, uint64_t *res);
 
