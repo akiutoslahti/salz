@@ -7,353 +7,469 @@
  * See file LICENSE or a copy at <https://opensource.org/licenses/MIT>.
  */
 
+#include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
-#include <stdint.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#include <sys/stat.h>
+
+#include <linux/limits.h>
 
 #include "common.h"
-#include "vlc.h"
 #include "salz.h"
 
-#define DEFAULT_LOG2_BLOCK_SIZE 16
+static const uint32_t salz_magic = 0x53414C5A;
 
-static inline size_t fread_vbyte(FILE *stream, uint32_t *res)
+#define OK     (0)
+#define ERROR (-1)
+
+static const char *suffix = ".salz";
+static const char *unsalz = "unsalz";
+static const char *salzcat = "salzcat";
+
+enum operation_mode {
+    COMPRESS,
+    DECOMPRESS,
+    PRINT_INFO,
+};
+static int operation_mode = COMPRESS;
+
+enum log_lvl {
+    LOG_LVL_NONE,
+    LOG_LVL_CRITICAL,
+    LOG_LVL_ERROR,
+    LOG_LVL_INFO,
+};
+static int log_lvl = LOG_LVL_INFO;
+
+static bool overwrite_output = false;
+static bool keep_input = false;
+static int compression_level = 5;
+
+#define log(lvl, fmt, ...) \
+    do { \
+        if (lvl <= log_lvl) \
+            fprintf(stderr, fmt "\n", ## __VA_ARGS__);\
+    } while (0)
+
+#define log_crit(fmt, ...) log(LOG_LVL_CRITICAL, fmt, ## __VA_ARGS__)
+#define log_err(fmt, ...) log(LOG_LVL_ERROR, fmt, ## __VA_ARGS__)
+#define log_info(fmt, ...) log(LOG_LVL_INFO, fmt, ## __VA_ARGS__)
+
+static const char *get_filename(const char *path)
 {
-    int byte;
-
-    if ((byte = fgetc(stream)) == EOF)
-        return 0;
-    *res = (unsigned int)byte & 0x7fu;
-    if ((unsigned int)byte >= 0x80u)
-        return 1;
-
-    if ((byte = fgetc(stream)) == EOF)
-        return 0;
-    *res = ((*res + 1) << 7) | ((unsigned int)byte & 0x7fu);
-    if ((unsigned int)byte >= 0x80u)
-        return 2;
-
-    if ((byte = fgetc(stream)) == EOF)
-        return 0;
-    *res = ((*res + 1) << 7) | ((unsigned int)byte & 0x7fu);
-    if ((unsigned int)byte >= 0x80u)
-        return 3;
-
-    if ((byte = fgetc(stream)) == EOF)
-        return 0;
-    *res = ((*res + 1) << 7) | ((unsigned int)byte & 0x7fu);
-    if ((unsigned int)byte >= 0x80u)
-        return 4;
-
-    if ((byte = fgetc(stream)) == EOF)
-        return 0;
-    *res = ((*res + 1) << 7) | ((unsigned int)byte & 0x7fu);
-    return 5;
-}
-
-static inline size_t fwrite_vbyte(FILE *stream, uint32_t val)
-{
-    uint64_t vbyte;
-    size_t vbyte_len = encode_vbyte_be(val, &vbyte);
-
-    if (!fwrite(&vbyte, vbyte_len, 1, stream))
-        return 0;
-
-    return vbyte_len;
-}
-
-static int compress_fname(char *in_fname, char *out_fname,
-        uint32_t log2_block_size)
-{
-    FILE *in_stream = NULL;
-    FILE *out_stream = NULL;
-    uint8_t *src_buf = NULL;
-    uint8_t *dst_buf = NULL;
-    uint32_t block_size;
-    size_t src_len;
-    size_t dst_len;
-    size_t read_len;
-    size_t in_fsize = 0;
-    size_t out_fsize = 0;
-    size_t write_len;
-    int ret = 0;
-    uint64_t clock;
-
-    block_size = 1 << log2_block_size;
-    src_len = block_size;
-    /* @TODO formulate maximum compressed size better */
-    dst_len = 2 * block_size;
-
-    if ((in_stream = fopen(in_fname, "r")) == NULL) {
-        perror("Input file could not be opened");
-        goto fail;
-    }
-
-    if ((out_stream = fopen(out_fname, "w")) == NULL) {
-        perror("Output file could not be opened");
-        goto fail;
-    }
-
-    src_buf = malloc(src_len);
-    dst_buf = malloc(dst_len);
-
-    if (src_buf == NULL || dst_buf == NULL)
-        goto fail;
-
-    clock = get_time_ns();
-
-    write_len = fwrite_vbyte(out_stream, block_size);
-    if (write_len == 0) {
-        /* @TODO add error ? */
-        goto fail;
-    }
-    out_fsize += write_len;
-
-    while ((read_len = fread(src_buf, 1, src_len, in_stream)) != 0) {
-        size_t encoded_len;
-        in_fsize += read_len;
-
-        encoded_len = dst_len;
-        if (salz_encode_safe(src_buf, read_len, dst_buf, &encoded_len) != 0) {
-            /* @TODO add error ? */
-            goto fail;
-        }
-
-        write_len = fwrite_vbyte(out_stream, encoded_len);
-        if (write_len == 0) {
-            /* @TODO add error ? */
-            goto fail;
-        }
-        out_fsize += write_len;
-
-        if (fwrite(dst_buf, 1, encoded_len, out_stream) != encoded_len) {
-            /* @TODO add error ? */
-            goto fail;
-        }
-        out_fsize += encoded_len;
-    }
-    clock = get_time_ns() - clock;
-
-    fprintf(stdout, "Compressed %zu bytes into %zu bytes (ratio: %.3f) in %.3f seconds\n",
-            in_fsize, out_fsize, 1.0 * in_fsize / out_fsize, 1.0 * clock / NS_IN_SEC);
-
-exit:
-    if (in_stream != NULL)
-        fclose(in_stream);
-    if (out_stream != NULL)
-        fclose(out_stream);
-    free(src_buf);
-    free(dst_buf);
-
-    return ret;
-
-fail:
-    ret = -1;
-    goto exit;
-}
-
-static int decompress_fname(char *in_fname, char *out_fname)
-{
-    FILE *in_stream = NULL;
-    FILE *out_stream = NULL;
-    uint8_t *src_buf = NULL;
-    uint8_t *dst_buf = NULL;
-    size_t src_len;
-    size_t dst_len;
-    uint32_t block_size;
-    uint32_t read_size;
-    size_t out_fsize = 0;
-    uint64_t clock;
-    int ret = 0;
-    size_t read_len;
-
-    if ((in_stream = fopen(in_fname, "r")) == NULL) {
-        perror("Input file could not be opened");
-        goto fail;
-    }
-
-    if ((out_stream = fopen(out_fname, "w")) == NULL) {
-        perror("Output file could not be opened");
-        goto fail;
-    }
-
-    read_len = fread_vbyte(in_stream, &block_size);
-    if (read_len == 0) {
-        /* @TODO Add error ? */
-        goto fail;
-    }
-
-    /* @TODO formulate maximum compressed size better */
-    src_len = 2 * block_size;
-    dst_len = block_size;
-
-    src_buf = malloc(src_len);
-    dst_buf = malloc(dst_len);
-
-    if (src_buf == NULL || dst_buf == NULL)
-        goto fail;
-
-    clock = get_time_ns();
-    while (fread_vbyte(in_stream, &read_size) != 0) {
-        size_t decoded_len;
-
-        if (read_size < src_len &&
-            fread(src_buf, 1, read_size, in_stream) != read_size) {
-            /* @TODO Add error ? */
-            goto fail;
-        }
-
-        decoded_len = dst_len;
-        if (salz_decode_safe(src_buf, read_size, dst_buf, &decoded_len) != 0) {
-            /* @TODO Add error ? */
-            goto fail;
-        }
-
-        if (fwrite(dst_buf, 1, decoded_len, out_stream) != decoded_len) {
-            /* @TODO Add error ? */
-            goto fail;
-        }
-
-        out_fsize += decoded_len;
-    }
-    clock = get_time_ns() - clock;
-
-    fprintf(stdout, "Decompressed %zu bytes in %.3f seconds\n",
-            out_fsize, 1.0 * clock / NS_IN_SEC);
-
-exit:
-    if (in_stream != NULL)
-        fclose(in_stream);
-    if (out_stream != NULL)
-        fclose(out_stream);
-    free(src_buf);
-    free(dst_buf);
-
-    return ret;
-
-fail:
-    ret = -1;
-    goto exit;
-}
-
-static void print_usage(char *binary_name)
-{
-    printf("Usage: %s [OPTION] [in_fname] [out_fname]\n", binary_name);
-    printf("Compress or uncompress in_fname to out_fname (by default, compress).\n");
-    printf("\n");
-    printf("-h, --help       display this help\n");
-    printf("-d, --decompress decompress\n");
-}
-
-static void suggest_help(char *binary_name)
-{
-    printf("See `%s --help` for more information.\n", binary_name);
-}
-
-static char *get_name(char *fpath)
-{
-    char *name;
-
-    if ((name = strrchr(fpath, '/')) != NULL)
+    const char *name;
+    if ((name = strrchr(path, '/')) != NULL)
         return name + 1;
 
-    return fpath;
+    return path;
 }
 
-static bool parse_u32(char *optarg, uint32_t *res)
+static void fill_outpath(const char *path, char buf[PATH_MAX])
 {
-    char *p;
-    unsigned long val;
+    size_t path_len = strlen(path);
+    size_t suffix_len = strlen(suffix);
 
-    if (optarg == NULL || res == NULL)
-        return false;
+    if (operation_mode == DECOMPRESS) {
+        size_t copy_len = path_len - suffix_len;
+        memcpy(buf, path, copy_len);
+        buf[copy_len] = '\0';
+    } else {
+        /* @todo: check this with fresh eyes */
+        const char *filename = get_filename(path);
+        size_t filename_len = strlen(filename);
+        size_t copy_len = path_len;
 
-    errno = 0;
-    val = strtoul(optarg, &p, 10);
-    if (errno != 0 || *p != '\0' || val > UINT32_MAX)
-        return false;
+        if (filename_len + suffix_len + 1 > NAME_MAX)
+            copy_len = path_len - filename_len + (NAME_MAX - (suffix_len + 1));
 
-    *res = (uint32_t)val;
+        if (path_len + suffix_len + 1 > PATH_MAX)
+            copy_len = PATH_MAX - (suffix_len + 1);
 
-    return true;
+        memcpy(buf, path, copy_len);
+        memcpy(buf + copy_len, suffix, suffix_len);
+        buf[copy_len + suffix_len] = '\0';
+    }
+}
+
+static int compress(FILE *in, FILE *out)
+{
+    uint8_t *inbuf;
+    uint8_t *outbuf;
+    size_t inbuf_cap;
+    size_t outbuf_cap;
+
+    uint32_t plain_len = 1 << (15 + compression_level);
+    /*
+     * @todo: create more substantial file header which contais
+     * magic number, version, flags, original size, original
+     * timestamp(s), original filename and checksum (optional)
+     */
+    uint8_t salz_hdr[8];
+
+    int ret = OK;
+
+    static_assert(sizeof(salz_magic) + sizeof(plain_len) == sizeof(salz_hdr));
+    memcpy(salz_hdr, &salz_magic, sizeof(salz_magic));
+    memcpy(salz_hdr + sizeof(salz_magic), &plain_len, sizeof(plain_len));
+
+    inbuf_cap = plain_len;
+    if ((inbuf = malloc(inbuf_cap)) == NULL) {
+        log_err("Couldn't allocate memory: (%zu bytes)", inbuf_cap);
+        return ERROR;
+    }
+
+    outbuf_cap = salz_encoded_len_max(inbuf_cap);
+    if ((outbuf = malloc(outbuf_cap)) == NULL) {
+        log_err("Couldn't allocate memory: (%zu bytes)", outbuf_cap);
+        free(inbuf);
+        return ERROR;
+    }
+
+    if (fwrite(salz_hdr, 1, sizeof(salz_hdr), out) != sizeof(salz_hdr)) {
+        log_err("Couldn't write SALZ header to output");
+        free(outbuf);
+        free(inbuf);
+        return ERROR;
+    }
+
+    for ( ;; ) {
+        size_t inbuf_len;
+        size_t outbuf_len = outbuf_cap;
+        uint32_t encoded_len;
+
+        if ((inbuf_len = fread(inbuf, 1, inbuf_cap, in)) != inbuf_cap) {
+            if (ferror(in)) {
+                log_err("Couldn't read from input stream");
+                ret = ERROR;
+                break;
+            }
+        }
+
+        if (salz_encode_safe(inbuf, inbuf_len, outbuf, &outbuf_len) != 0) {
+            log_err("Couldn't encode segment");
+            ret = ERROR;
+            break;
+        }
+
+        encoded_len = outbuf_len;
+        if (fwrite(&encoded_len, 1, sizeof(encoded_len), out) != sizeof(encoded_len)) {
+            log_err("Couldn't write encoded segments length to output stream");
+            ret = ERROR;
+            break;
+        }
+
+        if (fwrite(outbuf, 1, outbuf_len, out) != outbuf_len) {
+            log_err("Couldn't write encoded segment to output stream");
+            ret = ERROR;
+            break;
+        }
+
+        if (inbuf_len != inbuf_cap && feof(in)) {
+            ret = OK;
+            break;
+        }
+    }
+
+    free(outbuf);
+    free(inbuf);
+
+    return ret;
+}
+
+static int decompress(FILE *in, FILE *out)
+{
+    uint8_t *inbuf;
+    uint8_t *outbuf;
+    size_t inbuf_cap;
+    size_t outbuf_cap;
+
+    uint8_t salz_hdr[8];
+    uint32_t plain_len;
+
+    int ret = OK;
+
+    if (fread(salz_hdr, 1, sizeof(salz_hdr), in) != sizeof(salz_hdr)) {
+        log_err("Couldn't read SALZ header from input");
+        return ERROR;
+    }
+
+    if (memcmp(salz_hdr, &salz_magic, sizeof(salz_magic)) != 0) {
+        log_err("Not a SALZ header, unexpected magic number");
+        return ERROR;
+    }
+    memcpy(&plain_len, salz_hdr + sizeof(salz_magic), sizeof(plain_len));
+
+    inbuf_cap = salz_encoded_len_max(plain_len);
+    if ((inbuf = malloc(inbuf_cap)) == NULL) {
+        log_err("Couldn't allocate memory (%zu bytes)", inbuf_cap);
+        return ERROR;
+    }
+
+    outbuf_cap = plain_len;
+    if ((outbuf = malloc(outbuf_cap)) == NULL) {
+        log_err("Couldn't allocate memory (%zu bytes)", outbuf_cap);
+        free(inbuf);
+        return ERROR;
+    }
+
+    for ( ;; ) {
+        size_t inbuf_len;
+        size_t outbuf_len = outbuf_cap;
+        uint32_t encoded_len;
+
+        if (fread(&encoded_len, 1, sizeof(encoded_len), in) != sizeof(encoded_len)) {
+            if (ferror(in)) {
+                log_err("Couldn't read encoded segments length from input stream");
+                ret = ERROR;
+                break;
+            }
+
+            if (feof(in)) {
+                ret = OK;
+                break;
+            }
+        }
+
+        if (encoded_len > inbuf_cap) {
+            log_err("Encoded segment too large to fit into input buffer");
+            ret = ERROR;
+            break;
+        }
+
+        if ((inbuf_len = fread(inbuf, 1, encoded_len, in)) != encoded_len) {
+            log_err("Couldn't read encoded segment from input stream");
+            ret = ERROR;
+            break;
+        }
+
+        if (salz_decode_safe(inbuf, inbuf_len, outbuf, &outbuf_len) != 0) {
+            log_err("Couldn't decode segment");
+            ret = ERROR;
+            break;
+        }
+
+        if (fwrite(outbuf, 1, outbuf_len, out) != outbuf_len) {
+            log_err("Couldn't write decoded segment to output stream");
+            ret = ERROR;
+            break;
+        }
+    }
+
+    free(outbuf);
+    free(inbuf);
+
+    return ret;
+}
+
+static int process_path(const char *path)
+{
+    FILE *instream;
+    FILE *outstream;
+    char outpath[PATH_MAX];
+    struct stat st;
+    int rc;
+    bool has_suffix = strstr(path, suffix) != NULL;
+
+    if (has_suffix && operation_mode == COMPRESS) {
+        log_err("\"%s\" path already has \".salz\" suffix", path);
+        return ERROR;
+    }
+
+    if (!has_suffix && (operation_mode == DECOMPRESS || operation_mode == PRINT_INFO)) {
+        log_err("\"%s\" path has unknown suffix", path);
+        return ERROR;
+    }
+
+    if (stat(path, &st) != 0) {
+        log_err("Couldn't stat \"%s\" path (err: %d)", path, errno);
+        return ERROR;
+    }
+
+    if (!S_ISREG(st.st_mode)) {
+        log_err("\"%s\" path is not a regular file", path);
+        return ERROR;
+    }
+
+    instream = fopen(path, "r");
+    if (instream == NULL) {
+        log_err("Couldn't open \"%s\" path (err: %d)", path, errno);
+        return ERROR;
+    }
+
+    if (operation_mode == PRINT_INFO) {
+        outstream = NULL;
+    } else {
+        fill_outpath(path, outpath);
+        if (!overwrite_output && stat(outpath, &st) == 0) {
+            log_err("\"%s\" path already exists", outpath);
+            fclose(instream);
+            return ERROR;
+        }
+        outstream = fopen(outpath, "w");
+        if (outstream == NULL) {
+            log_err("Couldn't open \"%s\" path (err: %d)", outpath, errno);
+            fclose(instream);
+            return ERROR;
+        }
+    }
+
+    /* @todo: record operation time */
+    if (operation_mode == COMPRESS) {
+        rc = compress(instream, outstream);
+    } else if (operation_mode == DECOMPRESS) {
+        rc = decompress(instream, outstream);
+    } else if (operation_mode == PRINT_INFO) {
+        /* @todo: support this */
+        rc = -1;
+    } else {
+        log_crit("Unknown operation mode");
+        abort();
+    }
+
+    /* @todo: print operation time and compression ratio */
+
+    if (outstream != NULL)
+        fclose(outstream);
+    fclose(instream);
+
+    if (rc != 0) {
+        unlink(outpath);
+    } else if (!keep_input) {
+        unlink(path);
+    }
+
+    return (rc != 0) ? ERROR : 0;
 }
 
 int main(int argc, char *argv[])
 {
-    char *binary_name = get_name(argv[0]);
-    uint32_t log2_block_size = DEFAULT_LOG2_BLOCK_SIZE;
-    bool decompress_mode = false;
+    const char *execname = get_filename(argv[0]);
+    const char *short_opt = "cdfhklq0123456789";
+    const struct option long_opt[] = {
+        { "stdout", no_argument, NULL, 'c' },
+        { "decompress", no_argument, NULL, 'd' },
+        { "force", no_argument, NULL, 'f' },
+        { "help", no_argument, NULL, 'h' },
+        { "keep", no_argument, NULL, 'k' },
+        { "list", no_argument, NULL, 'l' },
+        { "quiet", no_argument, NULL, 'q' },
+        { "fast", no_argument, NULL, '1' },
+        { "best", no_argument, NULL, '9' },
+        { NULL, 0, NULL, 0 },
+    };
+    int ret = 0;
 
-    while (1) {
-        char *short_opt = "b:dh";
-        struct option long_opt[] = {
-            { "decompress", no_argument, NULL, 'd' },
-            { "help", no_argument, NULL, 'h' },
-            { NULL, 0, NULL, 0 }
-        };
-
-        int optc = getopt_long(argc, argv, short_opt, long_opt, NULL);
-
-        if (optc == -1)
+    for ( ;; ) {
+        int opt = getopt_long(argc, argv, short_opt, long_opt, NULL);
+        if (opt == -1)
             break;
 
-        switch (optc) {
-            case 'b': {
-                uint32_t u32val;
-                if (!parse_u32(optarg, &u32val) || u32val < 10 || 30 < u32val) {
-                    fprintf(stderr, "Invalid block size\n");
-                    return 1;
-                }
-                log2_block_size = u32val;
-                break;
-            }
+        switch (opt) {
+            case 'c':
+                /* @todo: support this */
+                fprintf(stderr, "writing to stdout not supported\n");
+                return ERROR;
 
             case 'd':
-                decompress_mode = true;
+                operation_mode = DECOMPRESS;
+                break;
+
+            case 'f':
+                overwrite_output = true;
                 break;
 
             case 'h':
-                print_usage(binary_name);
+                printf("salz, a Suffix Array-based Lempel-Ziv data compressor\n");
+                printf("\n");
+                printf("  usage: %s [options] input_file ...\n", execname);
+                printf("\n");
+                printf("  -c --stdout        write to standard output, keep input file\n");
+                printf("  -d --decompress    force decompression mode\n");
+                printf("  -f --force         force overwrite of output file\n");
+                printf("  -h --help          print this message\n");
+                printf("  -k --keep          keep input file\n");
+                printf("  -l --list          print information about salz-compressed file\n");
+                printf("  -q --quiet         suppress output\n");
+                printf("                     (specify twice to all but non-critical errors)\n");
+                printf("  -0 ... -9          compression level [default: 5]\n");
+                printf("                     (note that memory usage grows exponentially)\n");
+                printf("  --fast             alias of \"-1\"\n");
+                printf("  --best             alias of \"-9\"\n");
+                printf("\n");
+                printf("  Default action is to compress.\n");
+                printf("  If invoked as \"unsalz\", default action is to decompress.\n");
+                printf("                \"salzcat\", default action is to decompress to stdout.\n");
+                printf("\n");
+                printf("  If no input file is given, or - is provided instead, salz compresses\n");
+                printf("  or decompresses from standard input to standard output.\n");
                 return 0;
 
-            case '?':
-                suggest_help(binary_name);
+            case 'k':
+                keep_input = true;
                 break;
 
+            case 'l':
+                /* @todo: support this */
+                fprintf(stderr, "listing info not supported\n");
+                return ERROR;
+
+            case 'q':
+                if (log_lvl > 0)
+                    log_lvl--;
+                break;
+
+            case '0':
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+                compression_level = opt - '0';
+                break;
+
+            case '?':
             default:
-                return 1;
+                fprintf(stderr, "See \"%s --help\" for more information.\n", execname);
+                return ERROR;
         }
     }
 
-    char *in_fname = NULL;
-    char *out_fname = NULL;
-    while (optind < argc) {
-        if (in_fname == NULL) {
-            in_fname = argv[optind++];
-            continue;
-        }
-
-        if (out_fname == NULL) {
-            out_fname = argv[optind++];
-            continue;
-        }
-
-        fprintf(stderr, "%s: too many arguments\n", binary_name);
-        suggest_help(binary_name);
-        return 1;
+    if (strncmp(execname, unsalz, strlen(unsalz)) == 0) {
+        operation_mode = DECOMPRESS;
     }
 
-    if (in_fname == NULL || out_fname == NULL) {
-        fprintf(stderr, "%s: too few arguments\n", binary_name);
-        suggest_help(binary_name);
-        return 1;
+    if (strncmp(execname, salzcat, strlen(salzcat)) == 0) {
+        /* @todo: support this */
+        fprintf(stderr, "writing to stdout not supported\n");
+        return ERROR;
     }
 
-    if (decompress_mode)
-        return decompress_fname(in_fname, out_fname);
-    return compress_fname(in_fname, out_fname, log2_block_size);
+    argv += optind;
+    argc -= optind;
+
+    if (argc == 0 || *argv[0] == '-') {
+        /* @todo: support this */
+        fprintf(stderr, "compressing from stdin not supported\n");
+        return ERROR;
+    } else {
+        for ( ; *argv != NULL; argv++) {
+            int rc = process_path(*argv);
+            ret = min(ret, rc);
+        }
+    }
+
+    return ret;
 }
+

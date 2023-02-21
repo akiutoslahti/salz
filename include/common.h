@@ -10,23 +10,31 @@
 #ifndef SALZ_COMMON_H
 #define SALZ_COMMON_H
 
+#include <errno.h>
 #include <stdint.h>
 #include <time.h>
 
-#define NS_IN_SEC 1000000000
+#include "common.h"
 
-static uint64_t get_time_ns(void)
+#define min(a, b) (((a) < (b)) ? (a) : (b))
+#define divup(a, b) (((a) + (b) - 1) / (b))
+#define roundup(a, b) (divup(a, b) * b)
+
+#define unlikely(x) __builtin_expect((x),0)
+
+#define unused(x) ((void)(x))
+
+#define NS_IN_SEC (1 * 1000 * 1000)
+static inline int get_time_ns(uint64_t *res)
 {
     struct timespec ts;
 
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-    {
-        /* @TODO externalize printing error to caller */
-        //perror("clock_gettime");
-        return 0;
-    }
+        return errno;
 
-    return ts.tv_sec * NS_IN_SEC + ts.tv_nsec;
+    *res = ts.tv_sec * NS_IN_SEC + ts.tv_nsec;
+
+    return 0;
 }
 
 #endif /* !SALZ_COMMON_H */

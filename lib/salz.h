@@ -13,6 +13,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "common.h"
+
+/*
+ * Get worst case length for encoded segment
+ *
+ * @param[in]  plain_len  Length of segment (in bytes)
+ *
+ * @return                Worst case length for encoded segment
+ */
+static inline int salz_encoded_len_max(size_t plain_len)
+{
+    return 4 + plain_len + roundup(plain_len, 64) / 8;
+}
+
 /*
  * Encode plain segment with SALZ
  *

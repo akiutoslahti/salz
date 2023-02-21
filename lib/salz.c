@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "common.h"
 #include "salz.h"
 #include "libsais.h"
 
@@ -33,17 +34,12 @@
 #   define debug(fmt, ...) do {} while(0)
 #else
 #   include <stdio.h>
-#   define debug(fmt, ...) do { \
+#   define debug(fmt, ...) \
+        do { \
             fprintf(stderr, "(%s:%d) - " fmt "\n", \
                     __func__, __LINE__, ## __VA_ARGS__); \
         } while (0)
 #endif
-
-#define min(a, b) (((a) < (b)) ? (a) : (b))
-#define divup(a, b) (((a) + (b) - 1) / (b))
-#define roundup(a, b) (divup(a, b) * b)
-
-#define unlikely(x) __builtin_expect((x),0)
 
 #ifdef __GNUC__
 #   define salz_memcpy(dst, src, n) __builtin_memcpy(dst, src, n)
@@ -563,8 +559,8 @@ static void factorize(salz_io_ctx *ctx)
     }
 }
 
-#define min_factor_offs 1
-#define min_factor_len 3
+#define FACTOR_OFFSET_MIN 1
+#define FACTOR_LENGTH_MIN 3
 
 size_t vnibble_size(uint32_t val)
 {
@@ -598,7 +594,7 @@ static size_t vnibble_bitsize(uint32_t val)
 
 static size_t factor_offs_bitsize(uint32_t val)
 {
-    return 8 + vnibble_bitsize((val - min_factor_offs) >> 8);
+    return 8 + vnibble_bitsize((val - FACTOR_OFFSET_MIN) >> 8);
 }
 
 static size_t gr3_bitsize(uint32_t val)
@@ -608,7 +604,7 @@ static size_t gr3_bitsize(uint32_t val)
 
 static size_t factor_len_bitsize(uint32_t val)
 {
-    return gr3_bitsize(val - min_factor_len);
+    return gr3_bitsize(val - FACTOR_LENGTH_MIN);
 }
 
 static void optimize_factorization(salz_io_ctx *ctx)
@@ -631,7 +627,7 @@ static void optimize_factorization(salz_io_ctx *ctx)
 
         /* Cost of using PSV candidate */
         int32_t alt_len = aux[1 + 4 * src_pos];
-        if (alt_len >= min_factor_len) {
+        if (alt_len >= FACTOR_LENGTH_MIN) {
             int32_t alt_offs = aux[0 + 4 * src_pos];
             int32_t alt_cost = 1 + factor_offs_bitsize(alt_offs) +
                                factor_len_bitsize(alt_len) +
@@ -646,7 +642,7 @@ static void optimize_factorization(salz_io_ctx *ctx)
 
         /* Cost of using NSV candidate */
         alt_len = aux[3 + 4 * src_pos];
-        if (alt_len >= min_factor_len) {
+        if (alt_len >= FACTOR_LENGTH_MIN) {
             int32_t alt_offs = aux[2 + 4 * src_pos];
             int32_t alt_cost = 1 + factor_offs_bitsize(alt_offs) +
                                factor_len_bitsize(alt_len) +
@@ -675,9 +671,9 @@ static bool write_token(salz_io_ctx *ctx, uint8_t val)
 
 static bool write_factor_offs(salz_io_ctx *ctx, uint32_t val)
 {
-    if (unlikely(!write_vnibble(ctx, (val - min_factor_offs) >> 8)))
+    if (unlikely(!write_vnibble(ctx, (val - FACTOR_OFFSET_MIN) >> 8)))
         return false;
-    if (unlikely(!write_u8(ctx, (val - min_factor_offs) & 0xffu)))
+    if (unlikely(!write_u8(ctx, (val - FACTOR_OFFSET_MIN) & 0xffu)))
         return false;
 
     return true;
@@ -685,7 +681,7 @@ static bool write_factor_offs(salz_io_ctx *ctx, uint32_t val)
 
 static bool write_factor_len(salz_io_ctx *ctx, uint32_t val)
 {
-    if (unlikely(!write_gr3(ctx, val - min_factor_len)))
+    if (unlikely(!write_gr3(ctx, val - FACTOR_LENGTH_MIN)))
         return false;
 
     return true;
@@ -737,6 +733,10 @@ static bool emit_encoding(salz_io_ctx *ctx)
 
 static bool finalize_encoding(salz_io_ctx *ctx)
 {
+    /*
+     * @todo: create more substantial stream header, which contains
+     * version, type, flags, size and checksum (optional?)
+     */
     uint32_t stream_hdr = 0;
 
     /* Encode the last 8 bytes */
@@ -1108,7 +1108,7 @@ static bool read_factor_offs(salz_io_ctx *ctx, uint32_t *res)
     if (unlikely(!read_u8(ctx, &fixed)))
         return false;
 
-    *res = ((var << 8) | fixed) + min_factor_offs;
+    *res = ((var << 8) | fixed) + FACTOR_OFFSET_MIN;
 
     return true;
 }
@@ -1118,7 +1118,7 @@ static bool read_factor_len(salz_io_ctx *ctx, uint32_t *res)
     if (unlikely(!read_gr3(ctx, res)))
         return false;
 
-    *res += min_factor_len;
+    *res += FACTOR_LENGTH_MIN;
 
     return true;
 }
