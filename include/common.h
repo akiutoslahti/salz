@@ -24,7 +24,7 @@
 
 #define unused(x) ((void)(x))
 
-#define NS_IN_SEC (1 * 1000 * 1000)
+#define NS_IN_SEC (1 * 1000 * 1000 * 1000)
 static inline int get_time_ns(uint64_t *res)
 {
     struct timespec ts;

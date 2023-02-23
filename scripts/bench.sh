@@ -41,19 +41,23 @@ echo -e "5. Running benchmarks\n"
 shift
 for file in $@
 do
-    for bs in {15..24}
+    for lvl in {0..9}
     do
-        rm -f $build_path/out.salz $build_path/out.unsalz
+        rm -f $build_path/payload $build_path/payload_orig
+
+        cp $file $build_path/payload
+        cp $file $build_path/payload_orig
 
         sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
-        echo -n "filename: $(basename $file), block size: $bs, "
-        $build_path/programs/salz -b $bs $file $build_path/out.salz
+        echo "compression level: $lvl"
+        echo -n "    "
+        $build_path/programs/salz -$lvl $build_path/payload
 
         sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
         echo -n "    "
-        $build_path/programs/salz -d $build_path/out.salz $build_path/out.unsalz
+        $build_path/programs/salz -d $build_path/payload.salz
 
-        diff -q $file $build_path/out.unsalz
+        diff -q $build_path/payload $build_path/payload_orig
     done
     echo
 done

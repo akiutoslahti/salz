@@ -273,11 +273,17 @@ static int process_path(const char *path)
 {
     FILE *instream;
     FILE *outstream;
+    off_t insize;
+    off_t outsize;
     char outpath[PATH_MAX];
-    struct stat st;
+    bool has_suffix;
+    uint64_t ns_begin = 0;
+    uint64_t ns_end = 0;
     int rc;
-    bool has_suffix = strstr(path, suffix) != NULL;
 
+    struct stat st;
+
+    has_suffix = strstr(path, suffix) != NULL;
     if (has_suffix && operation_mode == COMPRESS) {
         log_err("\"%s\" path already has \".salz\" suffix", path);
         return ERROR;
@@ -297,6 +303,7 @@ static int process_path(const char *path)
         log_err("\"%s\" path is not a regular file", path);
         return ERROR;
     }
+    insize = st.st_size;
 
     instream = fopen(path, "r");
     if (instream == NULL) {
@@ -321,32 +328,47 @@ static int process_path(const char *path)
         }
     }
 
-    /* @todo: record operation time */
+    get_time_ns(&ns_begin);
     if (operation_mode == COMPRESS) {
         rc = compress(instream, outstream);
     } else if (operation_mode == DECOMPRESS) {
         rc = decompress(instream, outstream);
     } else if (operation_mode == PRINT_INFO) {
         /* @todo: support this */
-        rc = -1;
+        log_err("Operation not supported");
+        rc = ERROR;
     } else {
         log_crit("Unknown operation mode");
         abort();
     }
-
-    /* @todo: print operation time and compression ratio */
+    get_time_ns(&ns_end);
 
     if (outstream != NULL)
         fclose(outstream);
     fclose(instream);
 
     if (rc != 0) {
+        log_err("Operation failed");
         unlink(outpath);
-    } else if (!keep_input) {
+        return ERROR;
+    } else if (!keep_input)
         unlink(path);
-    }
 
-    return (rc != 0) ? ERROR : 0;
+    if (stat(outpath, &st) != 0) {
+        log_err("Couldn't stat \"%s\" path (err: %d)", outpath, errno);
+        return ERROR;
+    }
+    outsize = st.st_size;
+
+    if (operation_mode == COMPRESS)
+        log_info("%s: compressed %ld bytes to %ld bytes (ratio: %.3f) in %.3f seconds",
+                 path, insize, outsize, 1.0 * insize / outsize,
+                 (ns_end - ns_begin) * 1.0 / NS_IN_SEC);
+    else if (operation_mode == DECOMPRESS)
+        log_info("%s: decompressed %ld bytes in %.3f seconds",
+                 path, insize, (ns_end - ns_begin) * 1.0 / NS_IN_SEC);
+
+    return OK;
 }
 
 int main(int argc, char *argv[])
